@@ -8,6 +8,7 @@ A Conky-style system monitoring applet for the COSMIC desktop environment, featu
 - **Borderless Widget**: Floating overlay widget using Wayland layer-shell protocol (no window borders!)
 - **Clock Display**: Large time (HH:MM:SS) and date display with Conky-style text outlines
 - **Transparent Background**: Fully transparent widget background for seamless desktop integration
+- **Visual Indicators**: CPU and RAM icons with gradient progress bars that change color based on usage
 - **System Monitoring**: Real-time CPU, memory, network, and disk I/O statistics
 - **Customizable Position**: Precise X/Y positioning via settings window
 - **Configurable Display**: Toggle which stats to show and customize update intervals

@@ -85,10 +85,12 @@ MonitorWidget struct
 2. Create Cairo surface from buffer
 3. Set transparent background with `Operator::Source`
 4. Render clock with text outlines (stroke + fill)
-5. Render system metrics with Cairo/Pango
-6. Flush Cairo surface
-7. Attach buffer to Wayland surface
-8. Damage and commit surface
+5. Render CPU/RAM icons using Cairo paths
+6. Render progress bars with gradient fills (green/yellow/red based on usage)
+7. Render system metrics with Cairo/Pango
+8. Flush Cairo surface
+9. Attach buffer to Wayland surface
+10. Damage and commit surface
 
 **Config Watching**:
 - Polls config file every 500ms
@@ -101,6 +103,14 @@ MonitorWidget struct
 - Smaller :SS display (Ubuntu Bold 28)
 - Full date below clock (Ubuntu 16)
 - White text with black outlines (Conky-style)
+
+**Visual Indicators**:
+- CPU icon: Chip representation with pins
+- RAM icon: Memory stick with notch and chips
+- Progress bars: 200px wide with gradient fills
+  - Green gradient (< 50% usage)
+  - Yellow gradient (50-80% usage)
+  - Red gradient (> 80% usage)
 
 **System Monitoring**:
 - Uses `sysinfo::System` for CPU, memory, disk
