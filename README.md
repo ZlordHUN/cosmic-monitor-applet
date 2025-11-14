@@ -1,0 +1,1 @@
+# cosmic-monitor-applet
