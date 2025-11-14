@@ -13,6 +13,8 @@ pub struct Config {
     pub show_network: bool,
     /// Enable disk I/O monitoring
     pub show_disk: bool,
+    /// Enable storage/disk usage monitoring
+    pub show_storage: bool,
     /// Enable GPU monitoring
     pub show_gpu: bool,
     /// Show CPU temperature
@@ -52,6 +54,7 @@ impl Default for Config {
             show_memory: true,
             show_network: false,
             show_disk: false,
+            show_storage: true,
             show_gpu: false,
             show_cpu_temp: false,
             show_gpu_temp: false,

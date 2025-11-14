@@ -7,7 +7,7 @@ mod config;
 mod widget;
 
 use config::Config;
-use widget::{UtilizationMonitor, TemperatureMonitor, NetworkMonitor, WeatherMonitor};
+use widget::{UtilizationMonitor, TemperatureMonitor, NetworkMonitor, WeatherMonitor, StorageMonitor};
 use widget::renderer::{render_widget, RenderParams};
 use widget::layout::calculate_widget_height;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -61,6 +61,7 @@ struct MonitorWidget {
     temperature: TemperatureMonitor,
     network: NetworkMonitor,
     weather: WeatherMonitor,
+    storage: StorageMonitor,
     last_update: Instant,
     
     /// Memory pool for rendering
@@ -290,6 +291,7 @@ impl MonitorWidget {
             temperature: TemperatureMonitor::new(),
             network: NetworkMonitor::new(),
             weather: WeatherMonitor::new(weather_api_key, weather_location),
+            storage: StorageMonitor::new(),
             last_update: Instant::now(),
             pool: None,
             last_height: WIDGET_HEIGHT,
@@ -341,6 +343,11 @@ impl MonitorWidget {
         self.temperature.update();
         self.network.update();
         
+        // Update storage
+        if self.config.show_storage {
+            self.storage.update();
+        }
+        
         // Update weather (has its own rate limiting - every 10 minutes)
         if self.config.show_weather {
             self.weather.update();
@@ -356,8 +363,9 @@ impl MonitorWidget {
         self.update_system_stats();
         
         // Calculate dynamic height based on enabled components
+        let disk_count = if self.config.show_storage { self.storage.disk_info.len() } else { 0 };
         let width = WIDGET_WIDTH as i32;
-        let height = calculate_widget_height(&self.config) as i32;
+        let height = calculate_widget_height(&self.config, disk_count) as i32;
         let stride = width * 4;
 
         // Update layer surface size if height changed OR create pool if it doesn't exist
@@ -383,6 +391,7 @@ impl MonitorWidget {
         let show_memory = self.config.show_memory;
         let show_network = self.config.show_network;
         let show_disk = self.config.show_disk;
+        let show_storage = self.config.show_storage;
         let show_gpu = self.config.show_gpu;
         let show_cpu_temp = self.config.show_cpu_temp;
         let show_gpu_temp = self.config.show_gpu_temp;
@@ -421,6 +430,7 @@ impl MonitorWidget {
             show_memory,
             show_network,
             show_disk,
+            show_storage,
             show_gpu,
             show_cpu_temp,
             show_gpu_temp,
@@ -434,6 +444,7 @@ impl MonitorWidget {
             weather_desc,
             weather_location,
             weather_icon,
+            disk_info: &self.storage.disk_info,
         };
         
         render_widget(canvas, params);

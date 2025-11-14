@@ -13,7 +13,8 @@ A Conky-style system monitoring applet for the COSMIC desktop environment, featu
 - **Circular Temperature Gauges**: Color-changing hollow rings for temperature visualization (switchable to text mode)
 - **Transparent Background**: Fully transparent widget background for seamless desktop integration
 - **Visual Indicators**: CPU, RAM, and GPU icons with gradient progress bars that change color based on usage
-- **System Monitoring**: Real-time CPU, memory, GPU (NVIDIA via nvidia-smi), network, and disk I/O statistics
+- **System Monitoring**: Real-time CPU, memory, GPU (NVIDIA via nvidia-smi), storage usage, network, and disk I/O statistics
+- **Storage Monitoring**: Displays disk usage for system drives and external media with intelligent labeling (vendor + model names)
 - **Customizable Position**: Precise X/Y positioning via settings window
 - **Configurable Display**: Toggle individual stats (CPU, RAM, GPU, clock, date, temperatures), show/hide percentage values
 - **Native COSMIC Integration**: Built with libcosmic and follows COSMIC design patterns
@@ -70,6 +71,7 @@ Settings are stored using cosmic-config at:
 
 Available options:
 - **Monitoring**: Toggle CPU, memory, GPU, network, disk stats individually
+- **Storage Display**: Toggle storage/disk usage monitoring with per-drive usage bars
 - **Temperature Display**: Toggle CPU and GPU temperature monitoring independently, switch between circular gauges and text display
 - **Widget Display**: Toggle clock (12/24-hour format) and date displays independently
 - **Weather Display**: Toggle weather information, configure OpenWeatherMap API key and location
@@ -108,7 +110,7 @@ To enable weather display:
 2. Open Settings from the applet menu
 3. Enable "Show Weather"
 4. Enter your API key
-5. Enter your location (city name, e.g., "London" or "New York")
+5. Enter your location (e.g., "London" or "New York")
 
 Weather updates every 10 minutes and displays:
 - Current temperature

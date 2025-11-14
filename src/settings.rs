@@ -37,6 +37,7 @@ pub enum Message {
     ToggleMemory(bool),
     ToggleNetwork(bool),
     ToggleDisk(bool),
+    ToggleStorage(bool),
     ToggleGpu(bool),
     ToggleCpuTemp(bool),
     ToggleGpuTemp(bool),
@@ -165,6 +166,12 @@ impl Application for SettingsApp {
                 widget::toggler(self.config.show_disk).on_toggle(Message::ToggleDisk),
             ))
             .push(widget::divider::horizontal::default())
+            .push(widget::text::heading(fl!("storage-display")))
+            .push(widget::settings::item(
+                fl!("show-storage"),
+                widget::toggler(self.config.show_storage).on_toggle(Message::ToggleStorage),
+            ))
+            .push(widget::divider::horizontal::default())
             .push(widget::text::heading(fl!("temperature-display")))
             .push(widget::settings::item(
                 fl!("show-cpu-temp"),
@@ -275,6 +282,10 @@ impl Application for SettingsApp {
             }
             Message::ToggleDisk(enabled) => {
                 self.config.show_disk = enabled;
+                self.save_config();
+            }
+            Message::ToggleStorage(enabled) => {
+                self.config.show_storage = enabled;
                 self.save_config();
             }
             Message::ToggleGpu(enabled) => {

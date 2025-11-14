@@ -10,6 +10,7 @@ use pangocairo;
 use super::utilization::{draw_cpu_icon, draw_ram_icon, draw_gpu_icon, draw_progress_bar};
 use super::temperature::draw_temp_circle;
 use super::weather::draw_weather_icon;
+use super::storage::DiskInfo;
 
 /// Parameters for rendering the widget
 pub struct RenderParams<'a> {
@@ -26,6 +27,7 @@ pub struct RenderParams<'a> {
     pub show_memory: bool,
     pub show_network: bool,
     pub show_disk: bool,
+    pub show_storage: bool,
     pub show_gpu: bool,
     pub show_cpu_temp: bool,
     pub show_gpu_temp: bool,
@@ -39,6 +41,7 @@ pub struct RenderParams<'a> {
     pub weather_desc: &'a str,
     pub weather_location: &'a str,
     pub weather_icon: &'a str,
+    pub disk_info: &'a [DiskInfo],
 }
 
 /// Main rendering function for the widget
@@ -95,6 +98,11 @@ pub fn render_widget(canvas: &mut [u8], params: RenderParams) {
         
         if params.show_network {
             y_pos = render_network(&cr, &layout, y_pos, params.network_rx_rate, params.network_tx_rate);
+        }
+        
+        if params.show_storage {
+            y_pos += 10.0; // Spacing before storage section
+            y_pos = render_storage(&cr, &layout, y_pos, params.disk_info, params.show_percentages);
         }
         
         if params.show_disk {
@@ -611,4 +619,60 @@ fn render_weather(
     cr.stroke_preserve().expect("Failed to stroke");
     cr.set_source_rgb(0.7, 0.7, 0.7);
     cr.fill().expect("Failed to fill");
+}
+
+/// Render storage/disk usage section
+fn render_storage(cr: &cairo::Context, layout: &pango::Layout, y: f64, disk_info: &[DiskInfo], show_percentages: bool) -> f64 {
+    let mut y = y;
+    let bar_width = 200.0;
+    let bar_height = 12.0;
+    
+    // Section header
+    let header_font = pango::FontDescription::from_string("Ubuntu Bold 14");
+    layout.set_font_description(Some(&header_font));
+    layout.set_text("Storage");
+    cr.move_to(10.0, y);
+    pangocairo::functions::layout_path(cr, layout);
+    cr.set_source_rgb(0.0, 0.0, 0.0);
+    cr.set_line_width(2.0);
+    cr.stroke_preserve().expect("Failed to stroke");
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    cr.fill().expect("Failed to fill");
+    y += 35.0; // Spacing after header
+    
+    // Draw each disk
+    let font_desc = pango::FontDescription::from_string("Ubuntu 12");
+    layout.set_font_description(Some(&font_desc));
+    cr.set_line_width(2.0);
+    
+    for disk in disk_info {
+        // Draw disk name/mount point
+        layout.set_text(&disk.name);
+        cr.move_to(10.0, y);
+        pangocairo::functions::layout_path(cr, layout);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.stroke_preserve().expect("Failed to stroke");
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.fill().expect("Failed to fill");
+        y += 20.0; // Space between name and bar
+        
+        // Draw progress bar
+        draw_progress_bar(cr, 10.0, y, bar_width, bar_height, disk.used_percentage);
+        
+        // Draw percentage if enabled
+        if show_percentages {
+            let percentage_text = format!("{:.1}%", disk.used_percentage);
+            layout.set_text(&percentage_text);
+            cr.move_to(220.0, y);
+            pangocairo::functions::layout_path(cr, layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
+        }
+        
+        y += 25.0; // Space after bar before next disk
+    }
+    
+    y
 }

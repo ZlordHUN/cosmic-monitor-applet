@@ -115,15 +115,21 @@ MonitorWidget struct
   - Red gradient (> 80% usage)
 - Layout: Icon + Label + Bar + Percentage (if enabled)
 
-**System Monitoring**:
+### System Monitoring
 - Uses `sysinfo::System` for CPU, memory, disk
 - CPU: Global CPU percentage
 - Memory: Used/Total bytes + percentage
 - GPU: NVIDIA GPU utilization via `nvidia-smi --query-gpu=utilization.gpu`
   - Checks for nvidia-smi availability on initialization
   - Falls back to 0% if not available
+- Storage: Disk usage monitoring via `sysinfo::Disks`
+  - Filters to meaningful mounts (/, /home, /mnt/*, /media/*)
+  - Excludes system partitions (/boot, /snap, /run, /sys, /proc, /dev, /tmp)
+  - Uses `lsblk -ndo NAME,VENDOR,MODEL` for hardware identification
+  - Display names: "System" for /, "Home" for /home, vendor+model for external drives
+  - Shows usage percentage and capacity for each drive
 - Network: Placeholder (needs implementation)
-- Disk: Placeholder (needs implementation)
+- Disk I/O: Placeholder (needs implementation)
 
 ### 3. Settings (`src/settings.rs`, `src/settings_main.rs`)
 
@@ -144,6 +150,8 @@ Settings Window (Scrollable)
 │   ├── Show GPU (toggle)
 │   ├── Show Network (toggle)
 │   └── Show Disk (toggle)
+├── Storage Display
+│   └── Show Storage (toggle)
 ├── Widget Display
 │   ├── Show Clock (toggle)
 │   └── Show Date (toggle)
@@ -181,8 +189,10 @@ Settings Window → cosmic-config → Disk
 pub struct Config {
     show_cpu: bool,
     show_memory: bool,
+    show_gpu: bool,
     show_network: bool,
     show_disk: bool,
+    show_storage: bool,     // Storage/disk usage monitoring
     update_interval_ms: u64,
     show_percentages: bool,
     show_graphs: bool,
@@ -275,6 +285,8 @@ path = "src/settings_main.rs"
 ### Planned
 - [ ] Actual network statistics (rx/tx bytes per second)
 - [ ] Actual disk I/O statistics
+- [ ] Storage temperature monitoring
+- [ ] AMD/Intel GPU monitoring support
 - [ ] Graph visualizations (line graphs for trends)
 - [ ] Customizable colors/themes
 - [ ] Multiple widget instances with different configs
@@ -329,6 +341,10 @@ watch -n 0.5 cat ~/.config/cosmic/com.github.zoliviragh.CosmicMonitor/v1/config
 - `src/settings_main.rs` - Settings entry point
 - `src/settings.rs` - Settings application logic
 - `src/widget_main.rs` - Widget (layer-shell implementation)
+- `src/widget/renderer.rs` - Modular rendering system (extracted from widget_main.rs)
+- `src/widget/layout.rs` - Dynamic height calculation logic
+- `src/widget/storage.rs` - Storage/disk usage monitoring with lsblk integration
+- `src/widget/utilization.rs` - CPU, RAM, GPU monitoring with icon rendering
 - `src/config.rs` - Shared configuration structure
 - `src/i18n.rs` - Localization support
 - `i18n/en/cosmic_monitor_applet.ftl` - English translations

@@ -5,7 +5,7 @@
 use crate::config::Config;
 
 /// Calculate the required widget height based on enabled components
-pub fn calculate_widget_height(config: &Config) -> u32 {
+pub fn calculate_widget_height(config: &Config, disk_count: usize) -> u32 {
     let mut required_height = 10; // Base padding
     
     // Clock and date
@@ -55,6 +55,13 @@ pub fn calculate_widget_height(config: &Config) -> u32 {
     // Network section
     if config.show_network {
         required_height += 50; // Two network lines
+    }
+    
+    // Storage section
+    if config.show_storage && disk_count > 0 {
+        required_height += 10; // Spacing before header
+        required_height += 35; // "Storage" header
+        required_height += disk_count as u32 * 45; // Each disk: 20px name + 12px bar + 13px spacing
     }
     
     // Disk section
