@@ -9,7 +9,7 @@ use config::Config;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use std::sync::Arc;
 use std::time::Instant;
-use sysinfo::{System, Networks};
+use sysinfo::{System, Networks, Components};
 use chrono::Local;
 
 use smithay_client_toolkit::{
@@ -36,7 +36,7 @@ use wayland_client::{
 };
 
 const WIDGET_WIDTH: u32 = 350;
-const WIDGET_HEIGHT: u32 = 300;
+const WIDGET_HEIGHT: u32 = 400;
 
 struct MonitorWidget {
     registry_state: RegistryState,
@@ -57,10 +57,13 @@ struct MonitorWidget {
     /// System monitoring
     sys: System,
     networks: Networks,
+    components: Components,
     cpu_usage: f32,
     memory_usage: f32,
     memory_total: u64,
     memory_used: u64,
+    cpu_temp: f32,
+    gpu_temp: f32,
     network_rx_bytes: u64,
     network_tx_bytes: u64,
     network_rx_rate: f64,
@@ -69,6 +72,9 @@ struct MonitorWidget {
     
     /// Memory pool for rendering
     pool: Option<SlotPool>,
+    
+    /// Track last widget height for resizing
+    last_height: u32,
     
     /// Mouse dragging state
     dragging: bool,
@@ -285,16 +291,20 @@ impl MonitorWidget {
             last_config_check: Instant::now(),
             sys: System::new_all(),
             networks: Networks::new_with_refreshed_list(),
+            components: Components::new_with_refreshed_list(),
             cpu_usage: 0.0,
             memory_usage: 0.0,
             memory_total: 0,
             memory_used: 0,
+            cpu_temp: 0.0,
+            gpu_temp: 0.0,
             network_rx_bytes: 0,
             network_tx_bytes: 0,
             network_rx_rate: 0.0,
             network_tx_rate: 0.0,
             last_update: Instant::now(),
             pool: None,
+            last_height: WIDGET_HEIGHT,
             dragging: false,
             drag_start_x: 0.0,
             drag_start_y: 0.0,
@@ -367,6 +377,29 @@ impl MonitorWidget {
         }
         self.network_rx_bytes = total_rx;
         self.network_tx_bytes = total_tx;
+
+        // Update temperature readings
+        self.components.refresh();
+        
+        // Try to find CPU temperature
+        self.cpu_temp = 0.0;
+        for component in &self.components {
+            let label = component.label().to_lowercase();
+            if label.contains("cpu") || label.contains("package") || label.contains("core") || label.contains("tctl") || label.contains("tdie") {
+                self.cpu_temp = component.temperature();
+                break;
+            }
+        }
+        
+        // Try to find GPU temperature
+        self.gpu_temp = 0.0;
+        for component in &self.components {
+            let label = component.label().to_lowercase();
+            if label.contains("gpu") || label.contains("nvidia") || label.contains("amd") || label.contains("radeon") || label.contains("edge") {
+                self.gpu_temp = component.temperature();
+                break;
+            }
+        }
     }
 
     fn draw(&mut self, _qh: &QueueHandle<Self>) {
@@ -377,12 +410,69 @@ impl MonitorWidget {
 
         self.update_system_stats();
         
+        // Calculate dynamic height based on enabled components
+        let mut required_height = 10; // Base padding
+        
+        // Clock and date
+        if self.config.show_clock {
+            required_height += 70; // Clock height
+        }
+        if self.config.show_date {
+            required_height += 35; // Date height
+        }
+        if self.config.show_clock || self.config.show_date {
+            required_height += 20; // Spacing after clock/date
+        }
+        
+        // Utilization section
+        if self.config.show_cpu || self.config.show_memory || self.config.show_gpu {
+            required_height += 35; // "Utilization" header (increased to 35)
+            if self.config.show_cpu {
+                required_height += 30; // CPU bar
+            }
+            if self.config.show_memory {
+                required_height += 30; // RAM bar
+            }
+            if self.config.show_gpu {
+                required_height += 30; // GPU bar
+            }
+        }
+        
+        // Temperature section
+        if self.config.show_cpu_temp || self.config.show_gpu_temp {
+            required_height += 10; // Spacing before temps
+            required_height += 35; // "Temperatures" header (increased to 35)
+            if self.config.show_cpu_temp {
+                required_height += 25; // CPU temp
+            }
+            if self.config.show_gpu_temp {
+                required_height += 25; // GPU temp
+            }
+        }
+        
+        // Network section
+        if self.config.show_network {
+            required_height += 50; // Two network lines
+        }
+        
+        // Disk section
+        if self.config.show_disk {
+            required_height += 50; // Two disk lines
+        }
+        
+        required_height += 20; // Bottom padding
+        
         let width = WIDGET_WIDTH as i32;
-        let height = WIDGET_HEIGHT as i32;
+        let height = required_height.max(100) as i32; // Minimum 100px height
         let stride = width * 4;
 
-        // Create pool if it doesn't exist
-        if self.pool.is_none() {
+        // Update layer surface size if height changed OR create pool if it doesn't exist
+        if height as u32 != self.last_height || self.pool.is_none() {
+            self.last_height = height as u32;
+            layer_surface.set_size(width as u32, height as u32);
+            layer_surface.commit();
+            
+            // Recreate pool with new size
             self.pool = Some(SlotPool::new(width as usize * height as usize * 4, &self.shm_state)
                 .expect("Failed to create pool"));
         }
@@ -392,6 +482,8 @@ impl MonitorWidget {
         let memory_usage = self.memory_usage;
         let memory_used = self.memory_used;
         let memory_total = self.memory_total;
+        let cpu_temp = self.cpu_temp;
+        let gpu_temp = self.gpu_temp;
         let network_rx_rate = self.network_rx_rate;
         let network_tx_rate = self.network_tx_rate;
         let show_cpu = self.config.show_cpu;
@@ -399,9 +491,12 @@ impl MonitorWidget {
         let show_network = self.config.show_network;
         let show_disk = self.config.show_disk;
         let show_gpu = self.config.show_gpu;
+        let show_cpu_temp = self.config.show_cpu_temp;
+        let show_gpu_temp = self.config.show_gpu_temp;
         let show_clock = self.config.show_clock;
         let show_date = self.config.show_date;
         let show_percentages = self.config.show_percentages;
+        let use_24hour_time = self.config.use_24hour_time;
 
         let pool = self.pool.as_mut().unwrap();
 
@@ -412,10 +507,14 @@ impl MonitorWidget {
         // Use Cairo for rendering
         render_widget(
             canvas,
+            width,
+            height,
             cpu_usage,
             memory_usage,
             memory_used,
             memory_total,
+            cpu_temp,
+            gpu_temp,
             network_rx_rate,
             network_tx_rate,
             show_cpu,
@@ -423,9 +522,12 @@ impl MonitorWidget {
             show_network,
             show_disk,
             show_gpu,
+            show_cpu_temp,
+            show_gpu_temp,
             show_clock,
             show_date,
             show_percentages,
+            use_24hour_time,
         );
 
         // Attach the buffer to the surface
@@ -573,10 +675,14 @@ fn draw_progress_bar(cr: &cairo::Context, x: f64, y: f64, width: f64, height: f6
 
 fn render_widget(
     canvas: &mut [u8],
+    width: i32,
+    height: i32,
     cpu_usage: f32,
     memory_usage: f32,
     memory_used: u64,
     memory_total: u64,
+    cpu_temp: f32,
+    gpu_temp: f32,
     network_rx_rate: f64,
     network_tx_rate: f64,
     show_cpu: bool,
@@ -584,9 +690,12 @@ fn render_widget(
     show_network: bool,
     show_disk: bool,
     show_gpu: bool,
+    show_cpu_temp: bool,
+    show_gpu_temp: bool,
     show_clock: bool,
     show_date: bool,
     show_percentages: bool,
+    use_24hour_time: bool,
 ) {
     // Use unsafe to extend the lifetime for Cairo
     // This is safe because the surface doesn't outlive the canvas buffer
@@ -598,9 +707,9 @@ fn render_widget(
         cairo::ImageSurface::create_for_data(
             static_slice,
             cairo::Format::ARgb32,
-            WIDGET_WIDTH as i32,
-            WIDGET_HEIGHT as i32,
-            WIDGET_WIDTH as i32 * 4,
+            width,
+            height,
+            width * 4,
         )
         .expect("Failed to create cairo surface")
     };
@@ -625,8 +734,12 @@ fn render_widget(
         let now = chrono::Local::now();
         
         if show_clock {
-            // Draw large time (HH:MM)
-            let time_str = now.format("%H:%M").to_string();
+            // Draw large time (HH:MM or h:MM based on format)
+            let time_str = if use_24hour_time {
+                now.format("%H:%M").to_string()
+            } else {
+                now.format("%-I:%M").to_string()
+            };
             let font_desc = pango::FontDescription::from_string("Ubuntu Bold 48");
             layout.set_font_description(Some(&font_desc));
             layout.set_text(&time_str);
@@ -660,6 +773,22 @@ fn render_widget(
             cr.stroke_preserve().expect("Failed to stroke");
             cr.set_source_rgb(1.0, 1.0, 1.0);
             cr.fill().expect("Failed to fill");
+            
+            // For 12-hour format, add AM/PM indicator
+            if !use_24hour_time {
+                let ampm_str = now.format(" %p").to_string();
+                let font_desc = pango::FontDescription::from_string("Ubuntu Bold 20");
+                layout.set_font_description(Some(&font_desc));
+                layout.set_text(&ampm_str);
+                
+                let (seconds_width, _) = layout.pixel_size();
+                cr.move_to(10.0 + time_width as f64 + seconds_width as f64, y_pos + 10.0);
+                pangocairo::functions::layout_path(&cr, &layout);
+                cr.set_source_rgb(0.0, 0.0, 0.0);
+                cr.stroke_preserve().expect("Failed to stroke");
+                cr.set_source_rgb(1.0, 1.0, 1.0);
+                cr.fill().expect("Failed to fill");
+            }
             
             y_pos += 70.0; // Move down after clock
         }
@@ -698,6 +827,25 @@ fn render_widget(
         let font_desc = pango::FontDescription::from_string("Ubuntu 12");
         layout.set_font_description(Some(&font_desc));
         cr.set_line_width(2.0);
+        
+        // Draw "Utilization" header if any utilization metrics are shown
+        if show_cpu || show_memory || show_gpu {
+            let header_font = pango::FontDescription::from_string("Ubuntu Bold 14");
+            layout.set_font_description(Some(&header_font));
+            layout.set_text("Utilization");
+            cr.move_to(10.0, y);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
+            
+            y += 35.0; // Increased to 35px for more spacing
+            
+            // Reset to normal font
+            let font_desc = pango::FontDescription::from_string("Ubuntu 12");
+            layout.set_font_description(Some(&font_desc));
+        }
         
         if show_cpu {
             // Draw CPU icon
@@ -791,6 +939,60 @@ fn render_widget(
             }
             
             y += 30.0;
+        }
+
+        // Temperature section - show if either CPU or GPU temp is enabled
+        if show_cpu_temp || show_gpu_temp {
+            // Add spacing before temperature section
+            y += 10.0;
+            
+            // Draw temperature section label
+            let font_desc = pango::FontDescription::from_string("Ubuntu Bold 14");
+            layout.set_font_description(Some(&font_desc));
+            layout.set_text("Temperatures");
+            cr.move_to(10.0, y);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
+            y += 35.0; // Increased to 35px for more spacing
+
+            // Back to regular font
+            let font_desc = pango::FontDescription::from_string("Ubuntu 14");
+            layout.set_font_description(Some(&font_desc));
+
+            // CPU Temperature
+            if show_cpu_temp {
+                if cpu_temp > 0.0 {
+                    layout.set_text(&format!("  CPU: {:.1}°C", cpu_temp));
+                } else {
+                    layout.set_text("  CPU: N/A");
+                }
+                cr.move_to(10.0, y);
+                pangocairo::functions::layout_path(&cr, &layout);
+                cr.set_source_rgb(0.0, 0.0, 0.0);
+                cr.stroke_preserve().expect("Failed to stroke");
+                cr.set_source_rgb(1.0, 1.0, 1.0);
+                cr.fill().expect("Failed to fill");
+                y += 25.0;
+            }
+
+            // GPU Temperature
+            if show_gpu_temp {
+                if gpu_temp > 0.0 {
+                    layout.set_text(&format!("  GPU: {:.1}°C", gpu_temp));
+                } else {
+                    layout.set_text("  GPU: N/A");
+                }
+                cr.move_to(10.0, y);
+                pangocairo::functions::layout_path(&cr, &layout);
+                cr.set_source_rgb(0.0, 0.0, 0.0);
+                cr.stroke_preserve().expect("Failed to stroke");
+                cr.set_source_rgb(1.0, 1.0, 1.0);
+                cr.fill().expect("Failed to fill");
+                y += 25.0;
+            }
         }
 
         if show_network {

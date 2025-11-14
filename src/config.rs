@@ -15,10 +15,16 @@ pub struct Config {
     pub show_disk: bool,
     /// Enable GPU monitoring
     pub show_gpu: bool,
+    /// Show CPU temperature
+    pub show_cpu_temp: bool,
+    /// Show GPU temperature
+    pub show_gpu_temp: bool,
     /// Show clock display
     pub show_clock: bool,
     /// Show date display
     pub show_date: bool,
+    /// Use 24-hour time format (false = 12-hour with AM/PM)
+    pub use_24hour_time: bool,
     /// Update interval in milliseconds
     pub update_interval_ms: u64,
     /// Show percentage values
@@ -39,8 +45,11 @@ impl Default for Config {
             show_network: false,
             show_disk: false,
             show_gpu: false,
+            show_cpu_temp: false,
+            show_gpu_temp: false,
             show_clock: true,
             show_date: true,
+            use_24hour_time: false,
             update_interval_ms: 1000,
             show_percentages: true,
             widget_x: 50,

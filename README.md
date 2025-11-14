@@ -6,12 +6,14 @@ A Conky-style system monitoring applet for the COSMIC desktop environment, featu
 
 - **Panel Applet**: Integrates into COSMIC panel with a menu to toggle widget and open settings
 - **Borderless Widget**: Floating overlay widget using Wayland layer-shell protocol (no window borders!)
-- **Clock Display**: Large time (HH:MM:SS) and date display with Conky-style text outlines (toggleable)
+- **Dynamic Sizing**: Widget automatically adjusts height based on enabled features
+- **Clock Display**: Large time display with 12/24-hour format toggle and date with Conky-style text outlines (toggleable)
+- **Temperature Monitoring**: Individual CPU and GPU temperature displays with sensor detection
 - **Transparent Background**: Fully transparent widget background for seamless desktop integration
 - **Visual Indicators**: CPU, RAM, and GPU icons with gradient progress bars that change color based on usage
 - **System Monitoring**: Real-time CPU, memory, GPU (placeholder), network, and disk I/O statistics
 - **Customizable Position**: Precise X/Y positioning via settings window
-- **Configurable Display**: Toggle individual stats (CPU, RAM, GPU, clock, date), show/hide percentage values
+- **Configurable Display**: Toggle individual stats (CPU, RAM, GPU, clock, date, temperatures), show/hide percentage values
 - **Native COSMIC Integration**: Built with libcosmic and follows COSMIC design patterns
 
 ## Architecture
@@ -66,7 +68,8 @@ Settings are stored using cosmic-config at:
 
 Available options:
 - **Monitoring**: Toggle CPU, memory, GPU, network, disk stats individually
-- **Widget Display**: Toggle clock and date displays independently
+- **Temperature Display**: Toggle CPU and GPU temperature monitoring independently
+- **Widget Display**: Toggle clock (12/24-hour format) and date displays independently
 - **Display Options**: Show/hide percentage values next to progress bars
 - **Update Interval**: 100-10000ms refresh rate
 - **Widget Position**: Precise X/Y coordinates (requires restart to apply)

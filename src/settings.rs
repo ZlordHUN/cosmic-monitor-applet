@@ -34,8 +34,11 @@ pub enum Message {
     ToggleNetwork(bool),
     ToggleDisk(bool),
     ToggleGpu(bool),
+    ToggleCpuTemp(bool),
+    ToggleGpuTemp(bool),
     ToggleClock(bool),
     ToggleDate(bool),
+    Toggle24HourTime(bool),
     TogglePercentages(bool),
     UpdateInterval(String),
     UpdateX(String),
@@ -150,6 +153,16 @@ impl Application for SettingsApp {
                 widget::toggler(self.config.show_disk).on_toggle(Message::ToggleDisk),
             ))
             .push(widget::divider::horizontal::default())
+            .push(widget::text::heading(fl!("temperature-display")))
+            .push(widget::settings::item(
+                fl!("show-cpu-temp"),
+                widget::toggler(self.config.show_cpu_temp).on_toggle(Message::ToggleCpuTemp),
+            ))
+            .push(widget::settings::item(
+                fl!("show-gpu-temp"),
+                widget::toggler(self.config.show_gpu_temp).on_toggle(Message::ToggleGpuTemp),
+            ))
+            .push(widget::divider::horizontal::default())
             .push(widget::text::heading(fl!("widget-display")))
             .push(widget::settings::item(
                 fl!("show-clock"),
@@ -158,6 +171,10 @@ impl Application for SettingsApp {
             .push(widget::settings::item(
                 fl!("show-date"),
                 widget::toggler(self.config.show_date).on_toggle(Message::ToggleDate),
+            ))
+            .push(widget::settings::item(
+                fl!("use-24hour-time"),
+                widget::toggler(self.config.use_24hour_time).on_toggle(Message::Toggle24HourTime),
             ))
             .push(widget::divider::horizontal::default())
             .push(widget::text::heading(fl!("display-options")))
@@ -231,12 +248,24 @@ impl Application for SettingsApp {
                 self.config.show_gpu = enabled;
                 self.save_config();
             }
+            Message::ToggleCpuTemp(enabled) => {
+                self.config.show_cpu_temp = enabled;
+                self.save_config();
+            }
+            Message::ToggleGpuTemp(enabled) => {
+                self.config.show_gpu_temp = enabled;
+                self.save_config();
+            }
             Message::ToggleClock(enabled) => {
                 self.config.show_clock = enabled;
                 self.save_config();
             }
             Message::ToggleDate(enabled) => {
                 self.config.show_date = enabled;
+                self.save_config();
+            }
+            Message::Toggle24HourTime(enabled) => {
+                self.config.use_24hour_time = enabled;
                 self.save_config();
             }
             Message::TogglePercentages(enabled) => {
