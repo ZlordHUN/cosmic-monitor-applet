@@ -51,7 +51,7 @@ pub enum Message {
     ToggleWeather(bool),
     UpdateWeatherApiKey(String),
     UpdateWeatherLocation(String),
-    ApplyPosition,
+    SaveAndApply,
     CloseRequested,
 }
 
@@ -234,8 +234,8 @@ impl Application for SettingsApp {
                     .spacing(8)
                     .push(widget::column().width(cosmic::iced::Length::Fill))
                     .push(
-                        widget::button::standard("Apply Position")
-                            .on_press(Message::ApplyPosition)
+                        widget::button::suggested("Save & Apply Settings")
+                            .on_press(Message::SaveAndApply)
                     )
                     .push(widget::column().width(cosmic::iced::Length::Fill))
             );
@@ -346,9 +346,12 @@ impl Application for SettingsApp {
                 self.config.weather_location = value;
                 self.save_config();
             }
-            Message::ApplyPosition => {
-                // Restart the widget to apply new position
-                eprintln!("ApplyPosition clicked! Current position: X={}, Y={}", self.config.widget_x, self.config.widget_y);
+            Message::SaveAndApply => {
+                // Save all current settings to ensure they're persisted
+                self.save_config();
+                
+                // Restart the widget to apply all settings
+                eprintln!("Save & Apply clicked! Restarting widget with current settings.");
                 
                 match std::process::Command::new("pkill")
                     .arg("-f")

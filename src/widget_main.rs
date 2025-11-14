@@ -1032,7 +1032,7 @@ fn render_widget(
             let location_font = pango::FontDescription::from_string("Ubuntu 12");
             layout.set_font_description(Some(&location_font));
             layout.set_text(weather_location);
-            cr.move_to(info_x, y + 38.0);
+            cr.move_to(info_x, y + 45.0);
             pangocairo::functions::layout_path(&cr, &layout);
             cr.set_source_rgb(0.0, 0.0, 0.0);
             cr.stroke_preserve().expect("Failed to stroke");
