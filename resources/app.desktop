@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Cosmic Monitor Applet
+Comment=System resource monitor applet for COSMIC
+Type=Application
+Icon=com.github.zoliviragh.CosmicMonitor
+Exec=cosmic-monitor-applet %F
+Terminal=false
+StartupNotify=true
+Categories=COSMIC
+Keywords=COSMIC
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
+MimeType=

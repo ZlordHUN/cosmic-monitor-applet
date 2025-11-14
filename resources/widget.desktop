@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Cosmic Monitor Widget
+Comment=System resource monitor widget for COSMIC
+Type=Application
+Icon=com.github.zoliviragh.CosmicMonitor
+Exec=cosmic-monitor-widget
+Terminal=false
+StartupNotify=true
+Categories=COSMIC;System;Monitor;
+Keywords=monitor;system;performance;cpu;memory;
+NoDisplay=false

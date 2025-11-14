@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Cosmic Monitor Settings
+Comment=Configure system resource monitor for COSMIC
+Type=Application
+Icon=com.github.zoliviragh.CosmicMonitor
+Exec=cosmic-monitor-settings
+Terminal=false
+StartupNotify=true
+Categories=COSMIC;Settings;
+Keywords=monitor;system;settings;configure;
+NoDisplay=false
