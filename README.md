@@ -9,6 +9,7 @@ A Conky-style system monitoring applet for the COSMIC desktop environment, featu
 - **Dynamic Sizing**: Widget automatically adjusts height based on enabled features
 - **Clock Display**: Large time display with 12/24-hour format toggle and date with Conky-style text outlines (toggleable)
 - **Temperature Monitoring**: Individual CPU and GPU temperature displays with sensor detection
+- **Circular Temperature Gauges**: Color-changing hollow rings for temperature visualization (switchable to text mode)
 - **Transparent Background**: Fully transparent widget background for seamless desktop integration
 - **Visual Indicators**: CPU, RAM, and GPU icons with gradient progress bars that change color based on usage
 - **System Monitoring**: Real-time CPU, memory, GPU (placeholder), network, and disk I/O statistics
@@ -68,7 +69,7 @@ Settings are stored using cosmic-config at:
 
 Available options:
 - **Monitoring**: Toggle CPU, memory, GPU, network, disk stats individually
-- **Temperature Display**: Toggle CPU and GPU temperature monitoring independently
+- **Temperature Display**: Toggle CPU and GPU temperature monitoring independently, switch between circular gauges and text display
 - **Widget Display**: Toggle clock (12/24-hour format) and date displays independently
 - **Display Options**: Show/hide percentage values next to progress bars
 - **Update Interval**: 100-10000ms refresh rate

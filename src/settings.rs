@@ -36,6 +36,7 @@ pub enum Message {
     ToggleGpu(bool),
     ToggleCpuTemp(bool),
     ToggleGpuTemp(bool),
+    ToggleCircularTempDisplay(bool),
     ToggleClock(bool),
     ToggleDate(bool),
     Toggle24HourTime(bool),
@@ -162,6 +163,10 @@ impl Application for SettingsApp {
                 fl!("show-gpu-temp"),
                 widget::toggler(self.config.show_gpu_temp).on_toggle(Message::ToggleGpuTemp),
             ))
+            .push(widget::settings::item(
+                fl!("use-circular-temp-display"),
+                widget::toggler(self.config.use_circular_temp_display).on_toggle(Message::ToggleCircularTempDisplay),
+            ))
             .push(widget::divider::horizontal::default())
             .push(widget::text::heading(fl!("widget-display")))
             .push(widget::settings::item(
@@ -254,6 +259,10 @@ impl Application for SettingsApp {
             }
             Message::ToggleGpuTemp(enabled) => {
                 self.config.show_gpu_temp = enabled;
+                self.save_config();
+            }
+            Message::ToggleCircularTempDisplay(enabled) => {
+                self.config.use_circular_temp_display = enabled;
                 self.save_config();
             }
             Message::ToggleClock(enabled) => {

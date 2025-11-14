@@ -4,13 +4,15 @@
 //! This bypasses the compositor's window management to achieve borderless rendering
 
 mod config;
+mod widget;
 
 use config::Config;
+use widget::{UtilizationMonitor, TemperatureMonitor, NetworkMonitor};
+use widget::utilization::{draw_cpu_icon, draw_ram_icon, draw_gpu_icon, draw_progress_bar};
+use widget::temperature::draw_temp_circle;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use std::sync::Arc;
 use std::time::Instant;
-use sysinfo::{System, Networks, Components};
-use chrono::Local;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -54,20 +56,10 @@ struct MonitorWidget {
     config_handler: cosmic_config::Config,
     last_config_check: Instant,
     
-    /// System monitoring
-    sys: System,
-    networks: Networks,
-    components: Components,
-    cpu_usage: f32,
-    memory_usage: f32,
-    memory_total: u64,
-    memory_used: u64,
-    cpu_temp: f32,
-    gpu_temp: f32,
-    network_rx_bytes: u64,
-    network_tx_bytes: u64,
-    network_rx_rate: f64,
-    network_tx_rate: f64,
+    /// System monitoring modules
+    utilization: UtilizationMonitor,
+    temperature: TemperatureMonitor,
+    network: NetworkMonitor,
     last_update: Instant,
     
     /// Memory pool for rendering
@@ -289,19 +281,9 @@ impl MonitorWidget {
             config: Arc::new(config),
             config_handler,
             last_config_check: Instant::now(),
-            sys: System::new_all(),
-            networks: Networks::new_with_refreshed_list(),
-            components: Components::new_with_refreshed_list(),
-            cpu_usage: 0.0,
-            memory_usage: 0.0,
-            memory_total: 0,
-            memory_used: 0,
-            cpu_temp: 0.0,
-            gpu_temp: 0.0,
-            network_rx_bytes: 0,
-            network_tx_bytes: 0,
-            network_rx_rate: 0.0,
-            network_tx_rate: 0.0,
+            utilization: UtilizationMonitor::new(),
+            temperature: TemperatureMonitor::new(),
+            network: NetworkMonitor::new(),
             last_update: Instant::now(),
             pool: None,
             last_height: WIDGET_HEIGHT,
@@ -348,58 +330,10 @@ impl MonitorWidget {
         
         self.last_update = now;
 
-        // Update CPU usage
-        self.sys.refresh_cpu_all();
-        self.cpu_usage = self.sys.global_cpu_usage();
-
-        // Update memory usage
-        self.sys.refresh_memory();
-        self.memory_used = self.sys.used_memory();
-        self.memory_total = self.sys.total_memory();
-        self.memory_usage = if self.memory_total > 0 {
-            (self.memory_used as f32 / self.memory_total as f32) * 100.0
-        } else {
-            0.0
-        };
-
-        // Update network statistics
-        self.networks.refresh();
-        let mut total_rx = 0;
-        let mut total_tx = 0;
-        for (_interface_name, network) in &self.networks {
-            total_rx += network.received();
-            total_tx += network.transmitted();
-        }
-        
-        if self.network_rx_bytes > 0 {
-            self.network_rx_rate = (total_rx - self.network_rx_bytes) as f64 / elapsed;
-            self.network_tx_rate = (total_tx - self.network_tx_bytes) as f64 / elapsed;
-        }
-        self.network_rx_bytes = total_rx;
-        self.network_tx_bytes = total_tx;
-
-        // Update temperature readings
-        self.components.refresh();
-        
-        // Try to find CPU temperature
-        self.cpu_temp = 0.0;
-        for component in &self.components {
-            let label = component.label().to_lowercase();
-            if label.contains("cpu") || label.contains("package") || label.contains("core") || label.contains("tctl") || label.contains("tdie") {
-                self.cpu_temp = component.temperature();
-                break;
-            }
-        }
-        
-        // Try to find GPU temperature
-        self.gpu_temp = 0.0;
-        for component in &self.components {
-            let label = component.label().to_lowercase();
-            if label.contains("gpu") || label.contains("nvidia") || label.contains("amd") || label.contains("radeon") || label.contains("edge") {
-                self.gpu_temp = component.temperature();
-                break;
-            }
-        }
+        // Update monitoring modules
+        self.utilization.update();
+        self.temperature.update();
+        self.network.update();
     }
 
     fn draw(&mut self, _qh: &QueueHandle<Self>) {
@@ -442,11 +376,18 @@ impl MonitorWidget {
         if self.config.show_cpu_temp || self.config.show_gpu_temp {
             required_height += 10; // Spacing before temps
             required_height += 35; // "Temperatures" header (increased to 35)
-            if self.config.show_cpu_temp {
-                required_height += 25; // CPU temp
-            }
-            if self.config.show_gpu_temp {
-                required_height += 25; // GPU temp
+            
+            if self.config.use_circular_temp_display {
+                // Circular display: larger height for circles
+                required_height += 60; // Circular temp display height
+            } else {
+                // Text display
+                if self.config.show_cpu_temp {
+                    required_height += 25; // CPU temp
+                }
+                if self.config.show_gpu_temp {
+                    required_height += 25; // GPU temp
+                }
             }
         }
         
@@ -478,14 +419,14 @@ impl MonitorWidget {
         }
 
         // Store the data we need for rendering
-        let cpu_usage = self.cpu_usage;
-        let memory_usage = self.memory_usage;
-        let memory_used = self.memory_used;
-        let memory_total = self.memory_total;
-        let cpu_temp = self.cpu_temp;
-        let gpu_temp = self.gpu_temp;
-        let network_rx_rate = self.network_rx_rate;
-        let network_tx_rate = self.network_tx_rate;
+        let cpu_usage = self.utilization.cpu_usage;
+        let memory_usage = self.utilization.memory_usage;
+        let memory_used = self.utilization.memory_used;
+        let memory_total = self.utilization.memory_total;
+        let cpu_temp = self.temperature.cpu_temp;
+        let gpu_temp = self.temperature.gpu_temp;
+        let network_rx_rate = self.network.network_rx_rate;
+        let network_tx_rate = self.network.network_tx_rate;
         let show_cpu = self.config.show_cpu;
         let show_memory = self.config.show_memory;
         let show_network = self.config.show_network;
@@ -497,6 +438,7 @@ impl MonitorWidget {
         let show_date = self.config.show_date;
         let show_percentages = self.config.show_percentages;
         let use_24hour_time = self.config.use_24hour_time;
+        let use_circular_temp_display = self.config.use_circular_temp_display;
 
         let pool = self.pool.as_mut().unwrap();
 
@@ -528,6 +470,7 @@ impl MonitorWidget {
             show_date,
             show_percentages,
             use_24hour_time,
+            use_circular_temp_display,
         );
 
         // Attach the buffer to the surface
@@ -541,146 +484,14 @@ impl MonitorWidget {
     }
 }
 
-/// Draw a CPU icon (simple chip representation)
-fn draw_cpu_icon(cr: &cairo::Context, x: f64, y: f64, size: f64) {
-    // Draw chip body
-    cr.rectangle(x, y, size, size);
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.set_line_width(2.0);
-    cr.stroke_preserve().expect("Failed to stroke");
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.fill().expect("Failed to fill");
-    
-    // Draw pins on sides
-    let pin_length = size * 0.2;
-    let pin_spacing = size / 3.0;
-    
-    // Left pins
-    for i in 0..3 {
-        let py = y + pin_spacing * (i as f64 + 0.5);
-        cr.move_to(x, py);
-        cr.line_to(x - pin_length, py);
-    }
-    
-    // Right pins
-    for i in 0..3 {
-        let py = y + pin_spacing * (i as f64 + 0.5);
-        cr.move_to(x + size, py);
-        cr.line_to(x + size + pin_length, py);
-    }
-    
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.set_line_width(2.0);
-    cr.stroke_preserve().expect("Failed to stroke");
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.stroke().expect("Failed to stroke");
-}
-
-/// Draw a RAM icon (simple memory chip representation)
-fn draw_ram_icon(cr: &cairo::Context, x: f64, y: f64, size: f64) {
-    // Draw memory stick body
-    cr.rectangle(x, y + size * 0.2, size, size * 0.8);
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.set_line_width(2.0);
-    cr.stroke_preserve().expect("Failed to stroke");
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.fill().expect("Failed to fill");
-    
-    // Draw notch at top
-    let notch_width = size * 0.3;
-    let notch_x = x + (size - notch_width) / 2.0;
-    cr.rectangle(notch_x, y, notch_width, size * 0.2);
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.set_line_width(2.0);
-    cr.stroke_preserve().expect("Failed to stroke");
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.fill().expect("Failed to fill");
-    
-    // Draw chips on the body
-    let chip_size = size * 0.15;
-    for i in 0..3 {
-        let chip_y = y + size * 0.3 + i as f64 * size * 0.22;
-        cr.rectangle(x + size * 0.15, chip_y, chip_size, chip_size);
-        cr.rectangle(x + size * 0.55, chip_y, chip_size, chip_size);
-    }
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.set_line_width(1.5);
-    cr.stroke().expect("Failed to stroke");
-}
-
-/// Draw a GPU icon (graphics card representation)
-fn draw_gpu_icon(cr: &cairo::Context, x: f64, y: f64, size: f64) {
-    // Draw GPU card body
-    cr.rectangle(x, y + size * 0.3, size * 1.3, size * 0.7);
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.set_line_width(2.0);
-    cr.stroke_preserve().expect("Failed to stroke");
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.fill().expect("Failed to fill");
-    
-    // Draw fan (circle)
-    cr.arc(x + size * 0.65, y + size * 0.65, size * 0.25, 0.0, 2.0 * std::f64::consts::PI);
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.set_line_width(2.0);
-    cr.stroke().expect("Failed to stroke");
-    
-    // Draw PCIe connector
-    for i in 0..3 {
-        let connector_x = x + i as f64 * size * 0.15;
-        cr.rectangle(connector_x, y, size * 0.1, size * 0.25);
-    }
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.set_line_width(1.5);
-    cr.stroke().expect("Failed to stroke");
-}
-
-/// Draw a horizontal progress bar
-fn draw_progress_bar(cr: &cairo::Context, x: f64, y: f64, width: f64, height: f64, percentage: f32) {
-    // Draw background
-    cr.rectangle(x, y, width, height);
-    cr.set_source_rgba(0.2, 0.2, 0.2, 0.7);
-    cr.fill().expect("Failed to fill");
-    
-    // Draw border
-    cr.rectangle(x, y, width, height);
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.set_line_width(2.0);
-    cr.stroke_preserve().expect("Failed to stroke");
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.set_line_width(1.0);
-    cr.stroke().expect("Failed to stroke");
-    
-    // Draw filled portion
-    let fill_width = width * (percentage / 100.0).min(1.0) as f64;
-    if fill_width > 0.0 {
-        cr.rectangle(x + 1.0, y + 1.0, fill_width - 2.0, height - 2.0);
-        
-        // Gradient fill based on percentage
-        let pattern = cairo::LinearGradient::new(x, y, x + width, y);
-        if percentage < 50.0 {
-            pattern.add_color_stop_rgb(0.0, 0.2, 0.8, 0.2); // Green
-            pattern.add_color_stop_rgb(1.0, 0.4, 0.9, 0.4);
-        } else if percentage < 80.0 {
-            pattern.add_color_stop_rgb(0.0, 0.8, 0.8, 0.2); // Yellow
-            pattern.add_color_stop_rgb(1.0, 0.9, 0.9, 0.4);
-        } else {
-            pattern.add_color_stop_rgb(0.0, 0.9, 0.2, 0.2); // Red
-            pattern.add_color_stop_rgb(1.0, 1.0, 0.4, 0.4);
-        }
-        
-        cr.set_source(&pattern).expect("Failed to set source");
-        cr.fill().expect("Failed to fill");
-    }
-}
-
 fn render_widget(
     canvas: &mut [u8],
     width: i32,
     height: i32,
     cpu_usage: f32,
     memory_usage: f32,
-    memory_used: u64,
-    memory_total: u64,
+    _memory_used: u64,
+    _memory_total: u64,
     cpu_temp: f32,
     gpu_temp: f32,
     network_rx_rate: f64,
@@ -696,6 +507,7 @@ fn render_widget(
     show_date: bool,
     show_percentages: bool,
     use_24hour_time: bool,
+    use_circular_temp_display: bool,
 ) {
     // Use unsafe to extend the lifetime for Cairo
     // This is safe because the surface doesn't outlive the canvas buffer
@@ -958,40 +770,135 @@ fn render_widget(
             cr.fill().expect("Failed to fill");
             y += 35.0; // Increased to 35px for more spacing
 
-            // Back to regular font
-            let font_desc = pango::FontDescription::from_string("Ubuntu 14");
-            layout.set_font_description(Some(&font_desc));
-
-            // CPU Temperature
-            if show_cpu_temp {
-                if cpu_temp > 0.0 {
-                    layout.set_text(&format!("  CPU: {:.1}°C", cpu_temp));
-                } else {
-                    layout.set_text("  CPU: N/A");
+            if use_circular_temp_display {
+                // Circular temperature display
+                let circle_radius = 25.0;
+                let circle_diameter = circle_radius * 2.0;
+                let spacing = 20.0;
+                let mut x_offset = 15.0;
+                
+                // Maximum temperature for scaling (100°C)
+                let max_temp = 100.0;
+                
+                // CPU Temperature Circle
+                if show_cpu_temp {
+                    draw_temp_circle(&cr, x_offset, y, circle_radius, cpu_temp, max_temp);
+                    
+                    // Draw temperature value in center
+                    let temp_text = if cpu_temp > 0.0 {
+                        format!("{:.0}°", cpu_temp)
+                    } else {
+                        "N/A".to_string()
+                    };
+                    let font_desc = pango::FontDescription::from_string("Ubuntu Bold 12");
+                    layout.set_font_description(Some(&font_desc));
+                    layout.set_text(&temp_text);
+                    let (text_width, text_height) = layout.pixel_size();
+                    cr.move_to(
+                        x_offset + circle_radius - text_width as f64 / 2.0,
+                        y + circle_radius - text_height as f64 / 2.0
+                    );
+                    pangocairo::functions::layout_path(&cr, &layout);
+                    cr.set_source_rgb(0.0, 0.0, 0.0);
+                    cr.stroke_preserve().expect("Failed to stroke");
+                    cr.set_source_rgb(1.0, 1.0, 1.0);
+                    cr.fill().expect("Failed to fill");
+                    
+                    // Draw "CPU" label below circle
+                    let label_font = pango::FontDescription::from_string("Ubuntu 10");
+                    layout.set_font_description(Some(&label_font));
+                    layout.set_text("CPU");
+                    let (label_width, _) = layout.pixel_size();
+                    cr.move_to(
+                        x_offset + circle_radius - label_width as f64 / 2.0,
+                        y + circle_diameter + 2.0
+                    );
+                    pangocairo::functions::layout_path(&cr, &layout);
+                    cr.set_source_rgb(0.0, 0.0, 0.0);
+                    cr.stroke_preserve().expect("Failed to stroke");
+                    cr.set_source_rgb(1.0, 1.0, 1.0);
+                    cr.fill().expect("Failed to fill");
+                    
+                    x_offset += circle_diameter + spacing;
                 }
-                cr.move_to(10.0, y);
-                pangocairo::functions::layout_path(&cr, &layout);
-                cr.set_source_rgb(0.0, 0.0, 0.0);
-                cr.stroke_preserve().expect("Failed to stroke");
-                cr.set_source_rgb(1.0, 1.0, 1.0);
-                cr.fill().expect("Failed to fill");
-                y += 25.0;
-            }
-
-            // GPU Temperature
-            if show_gpu_temp {
-                if gpu_temp > 0.0 {
-                    layout.set_text(&format!("  GPU: {:.1}°C", gpu_temp));
-                } else {
-                    layout.set_text("  GPU: N/A");
+                
+                // GPU Temperature Circle
+                if show_gpu_temp {
+                    draw_temp_circle(&cr, x_offset, y, circle_radius, gpu_temp, max_temp);
+                    
+                    // Draw temperature value in center
+                    let temp_text = if gpu_temp > 0.0 {
+                        format!("{:.0}°", gpu_temp)
+                    } else {
+                        "N/A".to_string()
+                    };
+                    let font_desc = pango::FontDescription::from_string("Ubuntu Bold 12");
+                    layout.set_font_description(Some(&font_desc));
+                    layout.set_text(&temp_text);
+                    let (text_width, text_height) = layout.pixel_size();
+                    cr.move_to(
+                        x_offset + circle_radius - text_width as f64 / 2.0,
+                        y + circle_radius - text_height as f64 / 2.0
+                    );
+                    pangocairo::functions::layout_path(&cr, &layout);
+                    cr.set_source_rgb(0.0, 0.0, 0.0);
+                    cr.stroke_preserve().expect("Failed to stroke");
+                    cr.set_source_rgb(1.0, 1.0, 1.0);
+                    cr.fill().expect("Failed to fill");
+                    
+                    // Draw "GPU" label below circle
+                    let label_font = pango::FontDescription::from_string("Ubuntu 10");
+                    layout.set_font_description(Some(&label_font));
+                    layout.set_text("GPU");
+                    let (label_width, _) = layout.pixel_size();
+                    cr.move_to(
+                        x_offset + circle_radius - label_width as f64 / 2.0,
+                        y + circle_diameter + 2.0
+                    );
+                    pangocairo::functions::layout_path(&cr, &layout);
+                    cr.set_source_rgb(0.0, 0.0, 0.0);
+                    cr.stroke_preserve().expect("Failed to stroke");
+                    cr.set_source_rgb(1.0, 1.0, 1.0);
+                    cr.fill().expect("Failed to fill");
                 }
-                cr.move_to(10.0, y);
-                pangocairo::functions::layout_path(&cr, &layout);
-                cr.set_source_rgb(0.0, 0.0, 0.0);
-                cr.stroke_preserve().expect("Failed to stroke");
-                cr.set_source_rgb(1.0, 1.0, 1.0);
-                cr.fill().expect("Failed to fill");
-                y += 25.0;
+                
+                y += circle_diameter + 15.0; // Move down past circles and labels
+            } else {
+                // Text temperature display
+                let font_desc = pango::FontDescription::from_string("Ubuntu 14");
+                layout.set_font_description(Some(&font_desc));
+
+                // CPU Temperature
+                if show_cpu_temp {
+                    if cpu_temp > 0.0 {
+                        layout.set_text(&format!("  CPU: {:.1}°C", cpu_temp));
+                    } else {
+                        layout.set_text("  CPU: N/A");
+                    }
+                    cr.move_to(10.0, y);
+                    pangocairo::functions::layout_path(&cr, &layout);
+                    cr.set_source_rgb(0.0, 0.0, 0.0);
+                    cr.stroke_preserve().expect("Failed to stroke");
+                    cr.set_source_rgb(1.0, 1.0, 1.0);
+                    cr.fill().expect("Failed to fill");
+                    y += 25.0;
+                }
+
+                // GPU Temperature
+                if show_gpu_temp {
+                    if gpu_temp > 0.0 {
+                        layout.set_text(&format!("  GPU: {:.1}°C", gpu_temp));
+                    } else {
+                        layout.set_text("  GPU: N/A");
+                    }
+                    cr.move_to(10.0, y);
+                    pangocairo::functions::layout_path(&cr, &layout);
+                    cr.set_source_rgb(0.0, 0.0, 0.0);
+                    cr.stroke_preserve().expect("Failed to stroke");
+                    cr.set_source_rgb(1.0, 1.0, 1.0);
+                    cr.fill().expect("Failed to fill");
+                    y += 25.0;
+                }
             }
         }
 

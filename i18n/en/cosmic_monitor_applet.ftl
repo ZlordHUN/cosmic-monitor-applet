@@ -22,6 +22,7 @@ show-disk = Show Disk I/O
 show-gpu = Show GPU Usage
 show-cpu-temp = Show CPU Temperature
 show-gpu-temp = Show GPU Temperature
+use-circular-temp-display = Use Circular Temperature Display
 show-clock = Show Clock
 show-date = Show Date
 use-24hour-time = Use 24-Hour Time Format
