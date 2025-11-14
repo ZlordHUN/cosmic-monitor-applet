@@ -21,6 +21,12 @@ pub struct Config {
     pub show_gpu_temp: bool,
     /// Use circular display for temperatures (false = text display)
     pub use_circular_temp_display: bool,
+    /// Show weather information
+    pub show_weather: bool,
+    /// OpenWeatherMap API key
+    pub weather_api_key: String,
+    /// Weather location (city name or coordinates)
+    pub weather_location: String,
     /// Show clock display
     pub show_clock: bool,
     /// Show date display
@@ -50,6 +56,9 @@ impl Default for Config {
             show_cpu_temp: false,
             show_gpu_temp: false,
             use_circular_temp_display: true,
+            show_weather: false,
+            weather_api_key: String::new(),
+            weather_location: String::from("London,UK"),
             show_clock: true,
             show_date: true,
             use_24hour_time: false,

@@ -8,6 +8,7 @@ A Conky-style system monitoring applet for the COSMIC desktop environment, featu
 - **Borderless Widget**: Floating overlay widget using Wayland layer-shell protocol (no window borders!)
 - **Dynamic Sizing**: Widget automatically adjusts height based on enabled features
 - **Clock Display**: Large time display with 12/24-hour format toggle and date with Conky-style text outlines (toggleable)
+- **Weather Integration**: Real-time weather data with dynamic icons (sun, moon, clouds, rain, snow, fog, thunderstorm) from OpenWeatherMap API
 - **Temperature Monitoring**: Individual CPU and GPU temperature displays with sensor detection
 - **Circular Temperature Gauges**: Color-changing hollow rings for temperature visualization (switchable to text mode)
 - **Transparent Background**: Fully transparent widget background for seamless desktop integration
@@ -71,6 +72,7 @@ Available options:
 - **Monitoring**: Toggle CPU, memory, GPU, network, disk stats individually
 - **Temperature Display**: Toggle CPU and GPU temperature monitoring independently, switch between circular gauges and text display
 - **Widget Display**: Toggle clock (12/24-hour format) and date displays independently
+- **Weather Display**: Toggle weather information, configure OpenWeatherMap API key and location
 - **Display Options**: Show/hide percentage values next to progress bars
 - **Update Interval**: 100-10000ms refresh rate
 - **Widget Position**: Precise X/Y coordinates (requires restart to apply)
@@ -95,6 +97,24 @@ Trade-offs:
 - **chrono**: Date and time formatting
 - **sysinfo**: System statistics monitoring
 - **cosmic-config**: Configuration persistence
+- **reqwest**: HTTP client for weather API requests
+- **serde/serde_json**: JSON parsing for weather data
+
+## Weather Setup
+
+To enable weather display:
+
+1. Get a free API key from [OpenWeatherMap](https://openweathermap.org/api)
+2. Open Settings from the applet menu
+3. Enable "Show Weather"
+4. Enter your API key
+5. Enter your location (city name, e.g., "London" or "New York")
+
+Weather updates every 10 minutes and displays:
+- Current temperature
+- Weather description
+- Location name
+- Dynamic icon based on conditions (clear sky, clouds, rain, snow, fog, thunderstorm) with day/night variants
 
 ## Development
 

@@ -28,3 +28,9 @@ show-date = Show Date
 use-24hour-time = Use 24-Hour Time Format
 show-percentages = Show Percentages
 update-interval = Update Interval (ms)
+
+# Weather
+weather-display = Weather Display
+show-weather = Show Weather
+weather-api-key = OpenWeatherMap API Key
+weather-location = Location (City, Country)

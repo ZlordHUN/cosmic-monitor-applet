@@ -23,6 +23,10 @@ pub struct SettingsApp {
     x_input: String,
     /// Temporary state for Y position input
     y_input: String,
+    /// Temporary state for weather API key
+    weather_api_key_input: String,
+    /// Temporary state for weather location
+    weather_location_input: String,
 }
 
 /// Messages emitted by the settings app
@@ -44,6 +48,9 @@ pub enum Message {
     UpdateInterval(String),
     UpdateX(String),
     UpdateY(String),
+    ToggleWeather(bool),
+    UpdateWeatherApiKey(String),
+    UpdateWeatherLocation(String),
     ApplyPosition,
     CloseRequested,
 }
@@ -112,6 +119,8 @@ impl Application for SettingsApp {
         let interval_input = format!("{}", config.update_interval_ms);
         let x_input = format!("{}", config.widget_x);
         let y_input = format!("{}", config.widget_y);
+        let weather_api_key_input = config.weather_api_key.clone();
+        let weather_location_input = config.weather_location.clone();
 
         let app = SettingsApp {
             core,
@@ -120,6 +129,8 @@ impl Application for SettingsApp {
             interval_input,
             x_input,
             y_input,
+            weather_api_key_input,
+            weather_location_input,
         };
 
         (app, Task::none())
@@ -190,6 +201,23 @@ impl Application for SettingsApp {
             .push(widget::settings::item(
                 fl!("update-interval"),
                 widget::text_input("", &self.interval_input).on_input(Message::UpdateInterval),
+            ))
+            .push(widget::divider::horizontal::default())
+            .push(widget::text::heading(fl!("weather-display")))
+            .push(widget::settings::item(
+                fl!("show-weather"),
+                widget::toggler(self.config.show_weather)
+                    .on_toggle(Message::ToggleWeather),
+            ))
+            .push(widget::settings::item(
+                fl!("weather-api-key"),
+                widget::text_input("", &self.weather_api_key_input)
+                    .on_input(Message::UpdateWeatherApiKey),
+            ))
+            .push(widget::settings::item(
+                fl!("weather-location"),
+                widget::text_input("", &self.weather_location_input)
+                    .on_input(Message::UpdateWeatherLocation),
             ))
             .push(widget::divider::horizontal::default())
             .push(widget::text::heading("Widget Position"))
@@ -303,6 +331,20 @@ impl Application for SettingsApp {
                     self.config.widget_y = y;
                     self.save_config();
                 }
+            }
+            Message::ToggleWeather(enabled) => {
+                self.config.show_weather = enabled;
+                self.save_config();
+            }
+            Message::UpdateWeatherApiKey(value) => {
+                self.weather_api_key_input = value.clone();
+                self.config.weather_api_key = value;
+                self.save_config();
+            }
+            Message::UpdateWeatherLocation(value) => {
+                self.weather_location_input = value.clone();
+                self.config.weather_location = value;
+                self.save_config();
             }
             Message::ApplyPosition => {
                 // Restart the widget to apply new position

@@ -7,9 +7,10 @@ mod config;
 mod widget;
 
 use config::Config;
-use widget::{UtilizationMonitor, TemperatureMonitor, NetworkMonitor};
+use widget::{UtilizationMonitor, TemperatureMonitor, NetworkMonitor, WeatherMonitor};
 use widget::utilization::{draw_cpu_icon, draw_ram_icon, draw_gpu_icon, draw_progress_bar};
 use widget::temperature::draw_temp_circle;
+use widget::weather::draw_weather_icon;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use std::sync::Arc;
 use std::time::Instant;
@@ -60,6 +61,7 @@ struct MonitorWidget {
     utilization: UtilizationMonitor,
     temperature: TemperatureMonitor,
     network: NetworkMonitor,
+    weather: WeatherMonitor,
     last_update: Instant,
     
     /// Memory pool for rendering
@@ -270,6 +272,10 @@ impl MonitorWidget {
         let layer_shell = LayerShell::bind(globals, qh).expect("layer shell not available");
         let seat_state = SeatState::new(globals, qh);
 
+        // Clone weather config values before moving config
+        let weather_api_key = config.weather_api_key.clone();
+        let weather_location = config.weather_location.clone();
+
         Self {
             registry_state,
             output_state,
@@ -284,6 +290,7 @@ impl MonitorWidget {
             utilization: UtilizationMonitor::new(),
             temperature: TemperatureMonitor::new(),
             network: NetworkMonitor::new(),
+            weather: WeatherMonitor::new(weather_api_key, weather_location),
             last_update: Instant::now(),
             pool: None,
             last_height: WIDGET_HEIGHT,
@@ -334,6 +341,11 @@ impl MonitorWidget {
         self.utilization.update();
         self.temperature.update();
         self.network.update();
+        
+        // Update weather (has its own rate limiting - every 10 minutes)
+        if self.config.show_weather {
+            self.weather.update();
+        }
     }
 
     fn draw(&mut self, _qh: &QueueHandle<Self>) {
@@ -401,6 +413,13 @@ impl MonitorWidget {
             required_height += 50; // Two disk lines
         }
         
+        // Weather section
+        if self.config.show_weather {
+            required_height += 10; // Spacing before header
+            required_height += 35; // Header
+            required_height += 70; // Icon and text content (increased for bottom text clearance)
+        }
+        
         required_height += 20; // Bottom padding
         
         let width = WIDGET_WIDTH as i32;
@@ -439,6 +458,14 @@ impl MonitorWidget {
         let show_percentages = self.config.show_percentages;
         let use_24hour_time = self.config.use_24hour_time;
         let use_circular_temp_display = self.config.use_circular_temp_display;
+        let show_weather = self.config.show_weather;
+        
+        // Extract weather data
+        let (weather_temp, weather_desc, weather_location, weather_icon) = if let Some(ref data) = self.weather.weather_data {
+            (data.temperature, data.description.as_str(), data.location.as_str(), data.icon.as_str())
+        } else {
+            (0.0, "No data", "Unknown", "01d")
+        };
 
         let pool = self.pool.as_mut().unwrap();
 
@@ -471,6 +498,11 @@ impl MonitorWidget {
             show_percentages,
             use_24hour_time,
             use_circular_temp_display,
+            show_weather,
+            weather_temp,
+            weather_desc,
+            weather_location,
+            weather_icon,
         );
 
         // Attach the buffer to the surface
@@ -508,6 +540,11 @@ fn render_widget(
     show_percentages: bool,
     use_24hour_time: bool,
     use_circular_temp_display: bool,
+    show_weather: bool,
+    weather_temp: f32,
+    weather_desc: &str,
+    weather_location: &str,
+    weather_icon: &str,
 ) {
     // Use unsafe to extend the lifetime for Cairo
     // This is safe because the surface doesn't outlive the canvas buffer
@@ -939,6 +976,68 @@ fn render_widget(
             cr.stroke_preserve().expect("Failed to stroke");
             cr.set_source_rgb(1.0, 1.0, 1.0);
             cr.fill().expect("Failed to fill");
+            y += 25.0;
+        }
+        
+        // Weather section
+        if show_weather {
+            // Add spacing before weather section
+            y += 10.0;
+            
+            // Section header
+            let header_font = pango::FontDescription::from_string("Ubuntu Bold 14");
+            layout.set_font_description(Some(&header_font));
+            layout.set_text("Weather");
+            cr.move_to(10.0, y);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.set_line_width(2.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
+            y += 35.0; // Increased to 35px for more spacing
+            
+            // Draw weather icon
+            let icon_size = 40.0;
+            draw_weather_icon(&cr, 10.0, y, icon_size, weather_icon);
+            
+            // Weather info to the right of icon
+            let info_x = 60.0;
+            let font_desc = pango::FontDescription::from_string("Ubuntu 14");
+            layout.set_font_description(Some(&font_desc));
+            
+            // Temperature
+            if weather_temp > 0.0 {
+                layout.set_text(&format!("{:.1}°C", weather_temp));
+            } else {
+                layout.set_text("N/A");
+            }
+            cr.move_to(info_x, y);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
+            
+            // Description
+            layout.set_text(weather_desc);
+            cr.move_to(info_x, y + 20.0);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
+            
+            // Location
+            let location_font = pango::FontDescription::from_string("Ubuntu 12");
+            layout.set_font_description(Some(&location_font));
+            layout.set_text(weather_location);
+            cr.move_to(info_x, y + 38.0);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(0.7, 0.7, 0.7);
+            cr.fill().expect("Failed to fill");
         }
     }
     
@@ -1003,6 +1102,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(new_config) = Config::get_entry(&widget.config_handler) {
                 // Only update if config actually changed
                 if *widget.config != new_config {
+                    // Update weather monitor if API key or location changed
+                    if widget.config.weather_api_key != new_config.weather_api_key {
+                        widget.weather.set_api_key(new_config.weather_api_key.clone());
+                    }
+                    if widget.config.weather_location != new_config.weather_location {
+                        widget.weather.set_location(new_config.weather_location.clone());
+                    }
+                    
                     widget.config = Arc::new(new_config);
                     // Force a redraw
                     widget.draw(&qh);
