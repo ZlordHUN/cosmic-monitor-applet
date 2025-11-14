@@ -10,6 +10,7 @@ use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use std::sync::Arc;
 use std::time::Instant;
 use sysinfo::{System, Networks};
+use chrono::Local;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -34,8 +35,8 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 
-const WIDGET_WIDTH: u32 = 250;
-const WIDGET_HEIGHT: u32 = 200;
+const WIDGET_WIDTH: u32 = 350;
+const WIDGET_HEIGHT: u32 = 300;
 
 struct MonitorWidget {
     registry_state: RegistryState,
@@ -368,7 +369,7 @@ impl MonitorWidget {
         self.network_tx_bytes = total_tx;
     }
 
-    fn draw(&mut self, qh: &QueueHandle<Self>) {
+    fn draw(&mut self, _qh: &QueueHandle<Self>) {
         let layer_surface = match &self.layer_surface {
             Some(ls) => ls.clone(),
             None => return,
@@ -427,8 +428,7 @@ impl MonitorWidget {
             .attach(Some(buffer.wl_buffer()), 0, 0);
         layer_surface.wl_surface().damage_buffer(0, 0, width, height);
         
-        // Request next frame
-        layer_surface.wl_surface().frame(qh, layer_surface.wl_surface().clone());
+        // Commit changes
         layer_surface.wl_surface().commit();
     }
 }
@@ -467,31 +467,84 @@ fn render_widget(
     {
         let cr = cairo::Context::new(&surface).expect("Failed to create cairo context");
 
-        // Clear with semi-transparent background
-        cr.set_source_rgba(0.1, 0.1, 0.1, 0.9);
-        cr.paint().expect("Failed to paint background");
+        // Clear background to fully transparent
+        cr.save().expect("Failed to save");
+        cr.set_operator(cairo::Operator::Source);
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+        cr.paint().expect("Failed to clear");
+        cr.restore().expect("Failed to restore");
 
         // Set up Pango for text rendering
         let layout = pangocairo::functions::create_layout(&cr);
         
-        // Draw title
-        let font_desc = pango::FontDescription::from_string("Sans Bold 14");
+        // Get current date/time
+        let now = chrono::Local::now();
+        
+        // Draw large time (HH:MM)
+        let time_str = now.format("%H:%M").to_string();
+        let font_desc = pango::FontDescription::from_string("Ubuntu Bold 48");
         layout.set_font_description(Some(&font_desc));
-        layout.set_text("System Monitor");
+        layout.set_text(&time_str);
+        
+        // White text with black outline
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.move_to(10.0, 10.0);
-        pangocairo::functions::show_layout(&cr, &layout);
-
-        // Draw stats
-        let font_desc = pango::FontDescription::from_string("Sans 11");
-        layout.set_font_description(Some(&font_desc));
         
-        let mut y = 40.0;
+        // Draw outline
+        cr.set_line_width(3.0);
+        pangocairo::functions::layout_path(&cr, &layout);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.stroke_preserve().expect("Failed to stroke");
+        
+        // Fill with white
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.fill().expect("Failed to fill");
+        
+        // Get width of the time text to position seconds correctly
+        let (time_width, _) = layout.pixel_size();
+        
+        // Draw seconds (:SS) slightly smaller and raised
+        let seconds_str = now.format(":%S").to_string();
+        let font_desc = pango::FontDescription::from_string("Ubuntu Bold 28");
+        layout.set_font_description(Some(&font_desc));
+        layout.set_text(&seconds_str);
+        
+        cr.move_to(10.0 + time_width as f64, 15.0); // Position after HH:MM, slightly lower
+        pangocairo::functions::layout_path(&cr, &layout);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.stroke_preserve().expect("Failed to stroke");
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.fill().expect("Failed to fill");
+        
+        // Draw date below with more spacing
+        let date_str = now.format("%A, %d %B %Y").to_string();
+        let font_desc = pango::FontDescription::from_string("Ubuntu 16");
+        layout.set_font_description(Some(&font_desc));
+        layout.set_text(&date_str);
+        
+        cr.move_to(10.0, 80.0);
+        pangocairo::functions::layout_path(&cr, &layout);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.stroke_preserve().expect("Failed to stroke");
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.fill().expect("Failed to fill");
+        
+        // Start system stats below the clock
+        let mut y = 115.0;
+
+        // Draw stats with outline effect
+        let font_desc = pango::FontDescription::from_string("Ubuntu 12");
+        layout.set_font_description(Some(&font_desc));
+        cr.set_line_width(2.0);
         
         if show_cpu {
             layout.set_text(&format!("CPU: {:.1}%", cpu_usage));
             cr.move_to(10.0, y);
-            pangocairo::functions::show_layout(&cr, &layout);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
             y += 25.0;
         }
 
@@ -505,31 +558,51 @@ fn render_widget(
             };
             layout.set_text(&text);
             cr.move_to(10.0, y);
-            pangocairo::functions::show_layout(&cr, &layout);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
             y += 25.0;
         }
 
         if show_network {
             layout.set_text(&format!("Network ↓: {:.1} KB/s", network_rx_rate / 1024.0));
             cr.move_to(10.0, y);
-            pangocairo::functions::show_layout(&cr, &layout);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
             y += 25.0;
 
             layout.set_text(&format!("Network ↑: {:.1} KB/s", network_tx_rate / 1024.0));
             cr.move_to(10.0, y);
-            pangocairo::functions::show_layout(&cr, &layout);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
             y += 25.0;
         }
 
         if show_disk {
             layout.set_text("Disk Read: 0.0 KB/s");
             cr.move_to(10.0, y);
-            pangocairo::functions::show_layout(&cr, &layout);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
             y += 25.0;
 
             layout.set_text("Disk Write: 0.0 KB/s");
             cr.move_to(10.0, y);
-            pangocairo::functions::show_layout(&cr, &layout);
+            pangocairo::functions::layout_path(&cr, &layout);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.stroke_preserve().expect("Failed to stroke");
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.fill().expect("Failed to fill");
         }
     }
     
@@ -576,10 +649,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut widget = MonitorWidget::new(&globals, &qh, config, config_handler);
     widget.create_layer_surface(&qh);
 
+    let mut last_draw = Instant::now();
+
     // Main event loop
     loop {
-        // Check for config updates every 500ms
         let now = Instant::now();
+        
+        // Redraw every second for clock updates
+        if now.duration_since(last_draw).as_secs() >= 1 {
+            widget.draw(&qh);
+            last_draw = now;
+        }
+        
+        // Check for config updates every 500ms
         if now.duration_since(widget.last_config_check).as_millis() > 500 {
             widget.last_config_check = now;
             if let Ok(new_config) = Config::get_entry(&widget.config_handler) {
@@ -588,11 +670,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     widget.config = Arc::new(new_config);
                     // Force a redraw
                     widget.draw(&qh);
+                    last_draw = now; // Reset draw timer since we just drew
                 }
             }
         }
 
-        event_queue.blocking_dispatch(&mut widget)?;
+        // Dispatch pending events without blocking
+        event_queue.dispatch_pending(&mut widget)?;
+        
+        // Flush the connection
+        event_queue.flush()?;
+        
+        // Sleep briefly to avoid busy-waiting
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
         if widget.exit {
             break;
