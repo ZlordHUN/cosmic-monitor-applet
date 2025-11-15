@@ -3,6 +3,7 @@
 //! Weather monitoring using OpenWeatherMap API
 
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 // OpenWeatherMap API response structures
@@ -56,10 +57,11 @@ impl Default for WeatherData {
 }
 
 pub struct WeatherMonitor {
-    pub weather_data: Option<WeatherData>,
+    pub weather_data: Arc<Mutex<Option<WeatherData>>>,
     pub last_update: Instant,
-    api_key: String,
-    location: String,
+    api_key: Arc<Mutex<String>>,
+    location: Arc<Mutex<String>>,
+    update_requested: Arc<Mutex<bool>>,
 }
 
 impl WeatherMonitor {
@@ -67,49 +69,105 @@ impl WeatherMonitor {
         // Initialize last_update to 11 minutes ago to force immediate first update
         let last_update = Instant::now() - std::time::Duration::from_secs(660);
         
+        let api_key = Arc::new(Mutex::new(api_key));
+        let location = Arc::new(Mutex::new(location));
+        let update_requested = Arc::new(Mutex::new(false));
+        let weather_data = Arc::new(Mutex::new(None));
+        
+        // Spawn background thread for weather updates
+        let api_key_clone = Arc::clone(&api_key);
+        let location_clone = Arc::clone(&location);
+        let update_requested_clone = Arc::clone(&update_requested);
+        let weather_data_clone = Arc::clone(&weather_data);
+        
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                
+                // Check if update is needed
+                let requested = {
+                    let mut req = update_requested_clone.lock().unwrap();
+                    if *req {
+                        *req = false;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                
+                if requested {
+                    let api_key = api_key_clone.lock().unwrap().clone();
+                    let location = location_clone.lock().unwrap().clone();
+                    
+                    if !api_key.is_empty() && !location.is_empty() {
+                        log::info!("Background: Fetching weather data for location: {}", location);
+                        match Self::fetch_weather_static(&api_key, &location) {
+                            Ok(data) => {
+                                log::info!("Background: Weather data fetched: {}°C, {}", data.temperature, data.description);
+                                *weather_data_clone.lock().unwrap() = Some(data);
+                            }
+                            Err(e) => {
+                                log::error!("Background: Failed to fetch weather: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
         Self {
-            weather_data: None,
+            weather_data,
             last_update,
             api_key,
             location,
+            update_requested,
         }
     }
 
     pub fn update(&mut self) {
         // Only update if we have an API key and location
-        if self.api_key.is_empty() || self.location.is_empty() {
-            return;
+        {
+            let api_key = self.api_key.lock().unwrap();
+            let location = self.location.lock().unwrap();
+            
+            if api_key.is_empty() || location.is_empty() {
+                log::trace!("Weather update skipped: API key or location not configured");
+                return;
+            }
         }
-
+        
         // Don't update more than once every 10 minutes
-        if self.last_update.elapsed().as_secs() < 600 {
+        let elapsed = self.last_update.elapsed().as_secs();
+        if elapsed < 600 {
+            log::trace!("Weather update skipped: too soon ({}s since last update, need 600s)", elapsed);
             return;
         }
         
-        // Fetch weather data synchronously (blocking)
-        // Note: This blocks the thread, but updates are infrequent (every 10 minutes)
-        match self.fetch_weather() {
-            Ok(data) => {
-                self.weather_data = Some(data);
-                self.last_update = Instant::now();
-            }
-            Err(_e) => {
-                // Silently fail - weather data will remain stale or empty
-            }
-        }
+        log::info!("Requesting weather update from background thread");
+        *self.update_requested.lock().unwrap() = true;
+        self.last_update = Instant::now();
     }
-
-    fn fetch_weather(&self) -> Result<WeatherData, Box<dyn std::error::Error>> {
+    
+    fn fetch_weather_static(api_key: &str, location: &str) -> Result<WeatherData, Box<dyn std::error::Error>> {
         // Strip quotes from location and API key (cosmic_config may store them with quotes)
-        let location = self.location.trim_matches('"');
-        let api_key = self.api_key.trim_matches('"');
+        let location = location.trim_matches('"');
+        let api_key = api_key.trim_matches('"');
+        
+        log::debug!("Making API request for location: {}", location);
         
         let url = format!(
             "https://api.openweathermap.org/data/2.5/weather?q={}&appid={}&units=metric",
             location, api_key
         );
 
-        let response: OpenWeatherResponse = reqwest::blocking::get(&url)?.json()?;
+        // Use a client with timeout to prevent blocking indefinitely
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?;
+            
+        let response: OpenWeatherResponse = client.get(&url).send()?.json()?;
+        
+        log::debug!("Weather API response received for: {}", response.name);
 
         let description = response
             .weather
@@ -142,11 +200,11 @@ impl WeatherMonitor {
     }
     
     pub fn set_api_key(&mut self, api_key: String) {
-        self.api_key = api_key;
+        *self.api_key.lock().unwrap() = api_key;
     }
     
     pub fn set_location(&mut self, location: String) {
-        self.location = location;
+        *self.location.lock().unwrap() = location;
     }
 }
 

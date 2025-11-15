@@ -31,6 +31,7 @@ impl NetworkMonitor {
         let elapsed = now.duration_since(self.last_update).as_secs_f64();
         
         self.networks.refresh();
+        
         let mut total_rx = 0;
         let mut total_tx = 0;
         for (_interface_name, network) in &self.networks {

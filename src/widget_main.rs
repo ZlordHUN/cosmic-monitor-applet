@@ -317,7 +317,7 @@ impl MonitorWidget {
         layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT); // Anchor to top-left corner
         layer_surface.set_size(WIDGET_WIDTH, WIDGET_HEIGHT);
         layer_surface.set_exclusive_zone(-1); // Don't reserve space
-        eprintln!("Setting layer surface margins: top={}, left={}", self.config.widget_y, self.config.widget_x);
+        log::debug!("Setting layer surface margins: top={}, left={}", self.config.widget_y, self.config.widget_x);
         layer_surface.set_margin(self.config.widget_y, 0, 0, self.config.widget_x);
         layer_surface.set_keyboard_interactivity(
             smithay_client_toolkit::shell::wlr_layer::KeyboardInteractivity::None
@@ -338,26 +338,47 @@ impl MonitorWidget {
         
         self.last_update = now;
 
-        // Update monitoring modules
-        self.utilization.update();
-        self.temperature.update();
-        self.network.update();
+        log::trace!("Updating system stats");
+
+        // Update monitoring modules (only if enabled)
+        if self.config.show_cpu || self.config.show_memory || self.config.show_gpu {
+            log::trace!("Updating CPU/Memory/GPU utilization");
+            self.utilization.update();
+        }
+        
+        if self.config.show_cpu_temp || self.config.show_gpu_temp {
+            log::trace!("Updating temperature");
+            self.temperature.update();
+        }
+        
+        if self.config.show_network {
+            log::trace!("Updating network");
+            self.network.update();
+        }
         
         // Update storage
         if self.config.show_storage {
+            log::trace!("Updating storage");
             self.storage.update();
+            log::trace!("Storage updated, {} disks found", self.storage.disk_info.len());
         }
         
         // Update weather (has its own rate limiting - every 10 minutes)
         if self.config.show_weather {
+            log::trace!("Requesting weather update");
             self.weather.update();
         }
+        
+        log::trace!("System stats update complete");
     }
 
     fn draw(&mut self, _qh: &QueueHandle<Self>) {
         let layer_surface = match &self.layer_surface {
             Some(ls) => ls.clone(),
-            None => return,
+            None => {
+                log::warn!("No layer surface available for drawing");
+                return;
+            }
         };
 
         self.update_system_stats();
@@ -368,8 +389,11 @@ impl MonitorWidget {
         let height = calculate_widget_height(&self.config, disk_count) as i32;
         let stride = width * 4;
 
+        log::trace!("Drawing widget: {}x{} (disks: {})", width, height, disk_count);
+
         // Update layer surface size if height changed OR create pool if it doesn't exist
         if height as u32 != self.last_height || self.pool.is_none() {
+            log::debug!("Updating surface size to {}x{}", width, height);
             self.last_height = height as u32;
             layer_surface.set_size(width as u32, height as u32);
             layer_surface.commit();
@@ -382,7 +406,7 @@ impl MonitorWidget {
         // Store the data we need for rendering
         let cpu_usage = self.utilization.cpu_usage;
         let memory_usage = self.utilization.memory_usage;
-        let gpu_usage = self.utilization.gpu_usage;
+        let gpu_usage = self.utilization.get_gpu_usage();
         let cpu_temp = self.temperature.cpu_temp;
         let gpu_temp = self.temperature.gpu_temp;
         let network_rx_rate = self.network.network_rx_rate;
@@ -403,11 +427,18 @@ impl MonitorWidget {
         let show_weather = self.config.show_weather;
         
         // Extract weather data
-        let (weather_temp, weather_desc, weather_location, weather_icon) = if let Some(ref data) = self.weather.weather_data {
-            (data.temperature, data.description.as_str(), data.location.as_str(), data.icon.as_str())
-        } else {
-            (0.0, "No data", "Unknown", "01d")
+        let (weather_temp, weather_desc, weather_location, weather_icon) = {
+            let weather_data_guard = self.weather.weather_data.lock().unwrap();
+            if let Some(ref data) = *weather_data_guard {
+                (data.temperature, data.description.clone(), data.location.clone(), data.icon.clone())
+            } else {
+                (0.0, String::from("No data"), String::from("Unknown"), String::from("01d"))
+            }
         };
+        
+        let weather_desc = weather_desc.as_str();
+        let weather_location = weather_location.as_str();
+        let weather_icon = weather_icon.as_str();
 
         let pool = self.pool.as_mut().unwrap();
 
@@ -448,7 +479,15 @@ impl MonitorWidget {
             section_order: &self.config.section_order,
         };
         
-        render_widget(canvas, params);
+        // Wrap rendering in panic catch to prevent crashes
+        let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_widget(canvas, params);
+        }));
+        
+        if let Err(e) = render_result {
+            log::error!("Panic occurred during rendering: {:?}", e);
+            return; // Skip this frame
+        }
 
         // Attach the buffer to the surface
         layer_surface
@@ -458,6 +497,8 @@ impl MonitorWidget {
         
         // Commit changes
         layer_surface.wl_surface().commit();
+        
+        log::trace!("Frame rendered and committed successfully");
     }
 }
 
@@ -481,6 +522,12 @@ impl ProvidesRegistryState for MonitorWidget {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logger
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .init();
+    
+    log::info!("Starting COSMIC Monitor Widget");
+    
     // Load configuration
     let config_handler = cosmic_config::Config::new(
         "com.github.zoliviragh.CosmicMonitor",
@@ -489,16 +536,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let config = Config::get_entry(&config_handler).unwrap_or_default();
     
-    eprintln!("Widget starting with position: X={}, Y={}", config.widget_x, config.widget_y);
+    log::info!("Widget starting with position: X={}, Y={}", config.widget_x, config.widget_y);
+    log::info!("Weather enabled: {}, API key set: {}", config.show_weather, !config.weather_api_key.is_empty());
 
     // Connect to Wayland
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
 
+    log::info!("Connected to Wayland server");
+
     // Create widget
     let mut widget = MonitorWidget::new(&globals, &qh, config, config_handler);
     widget.create_layer_surface(&qh);
+
+    log::info!("Widget initialized, entering main loop");
 
     let mut last_draw = Instant::now();
 
@@ -508,6 +560,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         // Redraw every second for clock updates
         if now.duration_since(last_draw).as_secs() >= 1 {
+            log::trace!("Redrawing widget");
             widget.draw(&qh);
             last_draw = now;
         }
@@ -518,11 +571,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(new_config) = Config::get_entry(&widget.config_handler) {
                 // Only update if config actually changed
                 if *widget.config != new_config {
+                    log::info!("Configuration changed, updating widget");
                     // Update weather monitor if API key or location changed
                     if widget.config.weather_api_key != new_config.weather_api_key {
+                        log::info!("Weather API key changed");
                         widget.weather.set_api_key(new_config.weather_api_key.clone());
                     }
                     if widget.config.weather_location != new_config.weather_location {
+                        log::info!("Weather location changed to: {}", new_config.weather_location);
                         widget.weather.set_location(new_config.weather_location.clone());
                     }
                     
@@ -535,18 +591,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Dispatch pending events without blocking
-        event_queue.dispatch_pending(&mut widget)?;
+        log::trace!("Dispatching events");
+        if let Err(e) = event_queue.dispatch_pending(&mut widget) {
+            log::error!("Error dispatching events: {}", e);
+            // Broken pipe means compositor closed connection, exit gracefully
+            let error_str = format!("{}", e);
+            if error_str.contains("Broken pipe") || error_str.contains("os error 32") {
+                log::warn!("Broken pipe detected during dispatch, exiting gracefully");
+                break;
+            }
+            return Err(e.into());
+        }
+        log::trace!("Events dispatched");
         
-        // Flush the connection
-        event_queue.flush()?;
+        // CRITICAL: Always flush the connection to keep it alive
+        // Must call flush at least a few times per second according to Wayland best practices
+        log::trace!("Flushing connection");
+        if let Err(e) = conn.flush() {
+            log::error!("Error flushing connection: {}", e);
+            // Broken pipe means compositor closed connection, exit gracefully
+            let error_str = format!("{}", e);
+            if error_str.contains("Broken pipe") || error_str.contains("os error 32") {
+                log::warn!("Broken pipe while flushing connection, exiting gracefully");
+                break;
+            }
+            return Err(e.into());
+        }
+        log::trace!("Flush complete");
         
-        // Sleep briefly to avoid busy-waiting
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Small sleep to avoid busy-waiting while staying responsive
+        std::thread::sleep(std::time::Duration::from_millis(16)); // ~60 FPS responsiveness
 
         if widget.exit {
+            log::info!("Exit requested, shutting down");
             break;
         }
     }
 
+    log::info!("Widget exited cleanly");
     Ok(())
 }

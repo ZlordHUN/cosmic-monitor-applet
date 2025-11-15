@@ -5,6 +5,7 @@
 use sysinfo::Disks;
 use std::process::Command;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct DiskInfo {
@@ -18,18 +19,36 @@ pub struct DiskInfo {
 pub struct StorageMonitor {
     disks: Disks,
     pub disk_info: Vec<DiskInfo>,
+    disk_models: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl StorageMonitor {
     pub fn new() -> Self {
+        let disk_models = Arc::new(Mutex::new(HashMap::new()));
+        
+        // Spawn background thread to update disk models
+        let disk_models_clone = Arc::clone(&disk_models);
+        std::thread::spawn(move || {
+            loop {
+                // Fetch disk models from lsblk
+                if let Some(models) = Self::fetch_disk_models() {
+                    *disk_models_clone.lock().unwrap() = models;
+                }
+                
+                // Refresh every 10 seconds (disk models don't change often)
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+        });
+        
         Self {
             disks: Disks::new_with_refreshed_list(),
             disk_info: Vec::new(),
+            disk_models,
         }
     }
     
-    /// Get disk model names from lsblk
-    fn get_disk_models() -> HashMap<String, String> {
+    /// Get disk model names from lsblk (called from background thread)
+    fn fetch_disk_models() -> Option<HashMap<String, String>> {
         let mut models = HashMap::new();
         
         // Run lsblk to get device vendor and model
@@ -49,17 +68,18 @@ impl StorageMonitor {
             }
         }
         
-        models
+        Some(models)
     }
 
     pub fn update(&mut self) {
-        self.disks.refresh_list();
+        // Only refresh existing disk data, don't rescan for new disks every time
+        // refresh_list() causes file descriptor leaks when called frequently
         self.disks.refresh();
         
         self.disk_info.clear();
         
-        // Get disk models from lsblk
-        let disk_models = Self::get_disk_models();
+        // Get disk models from cache (updated by background thread)
+        let disk_models = self.disk_models.lock().unwrap().clone();
         
         for disk in &self.disks {
             let mount_point = disk.mount_point().to_string_lossy().to_string();

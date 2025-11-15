@@ -4,6 +4,15 @@
 
 use sysinfo::System;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+    None,
+}
 
 pub struct UtilizationMonitor {
     sys: System,
@@ -11,18 +20,39 @@ pub struct UtilizationMonitor {
     pub memory_usage: f32,
     pub memory_total: u64,
     pub memory_used: u64,
-    pub gpu_usage: f32,
-    gpu_available: bool,
+    pub gpu_usage: Arc<Mutex<f32>>,
+    gpu_vendor: GpuVendor,
 }
 
 impl UtilizationMonitor {
     pub fn new() -> Self {
-        // Check if NVIDIA GPU is available
-        let gpu_available = Command::new("nvidia-smi")
-            .arg("--query-gpu=utilization.gpu")
-            .arg("--format=csv,noheader,nounits")
-            .output()
-            .is_ok();
+        // Shared GPU usage value
+        let gpu_usage = Arc::new(Mutex::new(0.0f32));
+        
+        // Detect GPU vendor
+        let gpu_vendor = Self::detect_gpu_vendor();
+        
+        // Spawn background thread for GPU monitoring
+        if gpu_vendor != GpuVendor::None {
+            let gpu_usage_clone = Arc::clone(&gpu_usage);
+            std::thread::spawn(move || {
+                loop {
+                    // Update GPU usage every second for accuracy
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    
+                    let usage = match gpu_vendor {
+                        GpuVendor::Nvidia => Self::fetch_nvidia_gpu_usage(),
+                        GpuVendor::Amd => Self::fetch_amd_gpu_usage(),
+                        GpuVendor::Intel => Self::fetch_intel_gpu_usage(),
+                        GpuVendor::None => None,
+                    };
+                    
+                    if let Some(usage) = usage {
+                        *gpu_usage_clone.lock().unwrap() = usage;
+                    }
+                }
+            });
+        }
         
         Self {
             sys: System::new_all(),
@@ -30,8 +60,8 @@ impl UtilizationMonitor {
             memory_usage: 0.0,
             memory_total: 0,
             memory_used: 0,
-            gpu_usage: 0.0,
-            gpu_available,
+            gpu_usage,
+            gpu_vendor,
         }
     }
 
@@ -50,14 +80,58 @@ impl UtilizationMonitor {
             0.0
         };
         
-        // Update GPU usage (NVIDIA only for now)
-        if self.gpu_available {
-            self.gpu_usage = self.get_nvidia_gpu_usage();
-        }
+        // GPU usage is updated in background thread, no action needed here
     }
     
-    /// Get NVIDIA GPU utilization via nvidia-smi
-    fn get_nvidia_gpu_usage(&self) -> f32 {
+    /// Get current GPU usage from the Arc<Mutex>
+    pub fn get_gpu_usage(&self) -> f32 {
+        *self.gpu_usage.lock().unwrap()
+    }
+    
+    /// Detect which GPU vendor is present
+    fn detect_gpu_vendor() -> GpuVendor {
+        // Check for NVIDIA
+        if std::path::Path::new("/usr/bin/nvidia-smi").exists() {
+            return GpuVendor::Nvidia;
+        }
+        
+        // Check for AMD (radeontop or rocm-smi)
+        if std::path::Path::new("/usr/bin/radeontop").exists() 
+            || std::path::Path::new("/opt/rocm/bin/rocm-smi").exists() {
+            return GpuVendor::Amd;
+        }
+        
+        // Check for Intel (intel_gpu_top)
+        if std::path::Path::new("/usr/bin/intel_gpu_top").exists() {
+            return GpuVendor::Intel;
+        }
+        
+        // Also check sysfs for GPU presence
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                
+                // AMD GPUs show up as card0, card1, etc. with amdgpu driver
+                if name_str.starts_with("card") && !name_str.contains("-") {
+                    if let Ok(device_path) = std::fs::read_link(entry.path()) {
+                        let device_str = device_path.to_string_lossy();
+                        if device_str.contains("amdgpu") {
+                            return GpuVendor::Amd;
+                        }
+                        if device_str.contains("i915") {
+                            return GpuVendor::Intel;
+                        }
+                    }
+                }
+            }
+        }
+        
+        GpuVendor::None
+    }
+    
+    /// Fetch NVIDIA GPU utilization via nvidia-smi (called from background thread)
+    fn fetch_nvidia_gpu_usage() -> Option<f32> {
         let output = Command::new("nvidia-smi")
             .arg("--query-gpu=utilization.gpu")
             .arg("--format=csv,noheader,nounits")
@@ -66,10 +140,122 @@ impl UtilizationMonitor {
         match output {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                stdout.trim().parse::<f32>().unwrap_or(0.0)
+                stdout.trim().parse::<f32>().ok()
             }
-            _ => 0.0,
+            _ => None,
         }
+    }
+    
+    /// Fetch AMD GPU utilization via sysfs (called from background thread)
+    fn fetch_amd_gpu_usage() -> Option<f32> {
+        // Try reading from sysfs first (most reliable, no external tools needed)
+        // AMD GPUs expose utilization in /sys/class/drm/card*/device/gpu_busy_percent
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                
+                if name_str.starts_with("card") && !name_str.contains("-") {
+                    let busy_path = entry.path().join("device/gpu_busy_percent");
+                    if let Ok(content) = std::fs::read_to_string(&busy_path) {
+                        if let Ok(usage) = content.trim().parse::<f32>() {
+                            return Some(usage);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback to radeontop if available (requires sudo or specific permissions)
+        if std::path::Path::new("/usr/bin/radeontop").exists() {
+            let output = Command::new("radeontop")
+                .arg("-d")
+                .arg("-")
+                .arg("-l")
+                .arg("1")
+                .output();
+            
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Parse radeontop output (format: "gpu 45.67%")
+                    for line in stdout.lines() {
+                        if line.contains("gpu") {
+                            if let Some(percent_str) = line.split_whitespace().nth(1) {
+                                if let Some(num_str) = percent_str.strip_suffix('%') {
+                                    if let Ok(usage) = num_str.parse::<f32>() {
+                                        return Some(usage);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+    
+    /// Fetch Intel GPU utilization via sysfs (called from background thread)
+    fn fetch_intel_gpu_usage() -> Option<f32> {
+        // Intel GPUs expose utilization in /sys/class/drm/card*/gt/gt*/rps_cur_freq_mhz
+        // and /sys/class/drm/card*/gt/gt*/rps_max_freq_mhz
+        // We can calculate usage as (current_freq / max_freq) * 100
+        
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                
+                if name_str.starts_with("card") && !name_str.contains("-") {
+                    // Try gt0 first (most common)
+                    let cur_freq_path = entry.path().join("gt/gt0/rps_cur_freq_mhz");
+                    let max_freq_path = entry.path().join("gt/gt0/rps_max_freq_mhz");
+                    
+                    if let (Ok(cur_str), Ok(max_str)) = (
+                        std::fs::read_to_string(&cur_freq_path),
+                        std::fs::read_to_string(&max_freq_path)
+                    ) {
+                        if let (Ok(cur_freq), Ok(max_freq)) = (
+                            cur_str.trim().parse::<f32>(),
+                            max_str.trim().parse::<f32>()
+                        ) {
+                            if max_freq > 0.0 {
+                                return Some((cur_freq / max_freq) * 100.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback to intel_gpu_top if available (requires root or CAP_PERFMON)
+        if std::path::Path::new("/usr/bin/intel_gpu_top").exists() {
+            let output = Command::new("intel_gpu_top")
+                .arg("-J")
+                .arg("-s")
+                .arg("100")
+                .output();
+            
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Parse JSON output for render/busy percentage
+                    // This is a simplified parser - a proper implementation would use serde_json
+                    if let Some(busy_idx) = stdout.find("\"busy\":") {
+                        let after_busy = &stdout[busy_idx + 8..];
+                        if let Some(end_idx) = after_busy.find(|c: char| !c.is_numeric() && c != '.') {
+                            if let Ok(usage) = after_busy[..end_idx].parse::<f32>() {
+                                return Some(usage);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
     }
 }
 
