@@ -41,3 +41,6 @@ weather-location = Location (e.g., London, New York)
 layout-order = Layout Order
 layout-order-description = Use the arrow buttons to change the order sections appear in the widget
 
+# Widget Behavior
+widget-autostart = Auto-start widget on login
+

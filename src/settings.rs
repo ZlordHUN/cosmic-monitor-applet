@@ -52,6 +52,7 @@ pub enum Message {
     ToggleWeather(bool),
     UpdateWeatherApiKey(String),
     UpdateWeatherLocation(String),
+    ToggleWidgetAutostart(bool),
     MoveSectionUp(usize),
     MoveSectionDown(usize),
     SaveAndApply,
@@ -267,6 +268,11 @@ impl Application for SettingsApp {
             .push(widget::divider::horizontal::default())
             .push(widget::text::heading("Widget Position"))
             .push(widget::settings::item(
+                fl!("widget-autostart"),
+                widget::toggler(self.config.widget_autostart)
+                    .on_toggle(Message::ToggleWidgetAutostart),
+            ))
+            .push(widget::settings::item(
                 "X Position",
                 widget::text_input("", &self.x_input).on_input(Message::UpdateX),
             ))
@@ -383,6 +389,10 @@ impl Application for SettingsApp {
             }
             Message::ToggleWeather(enabled) => {
                 self.config.show_weather = enabled;
+                self.save_config();
+            }
+            Message::ToggleWidgetAutostart(enabled) => {
+                self.config.widget_autostart = enabled;
                 self.save_config();
             }
             Message::UpdateWeatherApiKey(value) => {

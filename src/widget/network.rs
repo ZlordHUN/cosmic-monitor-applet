@@ -39,9 +39,14 @@ impl NetworkMonitor {
             total_tx += network.transmitted();
         }
         
-        if self.network_rx_bytes > 0 {
+        // Handle counter resets (e.g., after kernel update or interface restart)
+        if self.network_rx_bytes > 0 && total_rx >= self.network_rx_bytes && total_tx >= self.network_tx_bytes {
             self.network_rx_rate = (total_rx - self.network_rx_bytes) as f64 / elapsed;
             self.network_tx_rate = (total_tx - self.network_tx_bytes) as f64 / elapsed;
+        } else {
+            // Counter was reset or this is the first update, reset rates to 0
+            self.network_rx_rate = 0.0;
+            self.network_tx_rate = 0.0;
         }
         self.network_rx_bytes = total_rx;
         self.network_tx_bytes = total_tx;

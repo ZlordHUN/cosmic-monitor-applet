@@ -46,6 +46,19 @@ impl AppModel {
             }
         }
     }
+    
+    fn check_widget_running() -> bool {
+        // Check if cosmic-monitor-widget process is running
+        if let Ok(output) = std::process::Command::new("pgrep")
+            .arg("-f")
+            .arg("cosmic-monitor-widget")
+            .output()
+        {
+            !output.stdout.is_empty()
+        } else {
+            false
+        }
+    }
 }
 
 /// Create a COSMIC application from the app model
@@ -87,12 +100,26 @@ impl cosmic::Application for AppModel {
             .unwrap_or_default();
 
         let interval_input = format!("{}", config.update_interval_ms);
+        
+        // Check if widget should auto-start
+        let widget_running = if config.widget_autostart {
+            // Try to launch the widget
+            if let Ok(_) = std::process::Command::new("cosmic-monitor-widget").spawn() {
+                true
+            } else {
+                false
+            }
+        } else {
+            // Check if widget is already running even if autostart is disabled
+            Self::check_widget_running()
+        };
 
         let app = AppModel {
             core,
             config,
             config_handler,
             interval_input,
+            widget_running,
             ..Default::default()
         };
 
@@ -197,10 +224,16 @@ impl cosmic::Application for AppModel {
                         .arg("cosmic-monitor-widget")
                         .spawn();
                     self.widget_running = false;
+                    // Update config to not auto-start
+                    self.config.widget_autostart = false;
+                    self.save_config();
                 } else {
                     // Launch the widget
                     if let Ok(_) = std::process::Command::new("cosmic-monitor-widget").spawn() {
                         self.widget_running = true;
+                        // Update config to auto-start
+                        self.config.widget_autostart = true;
+                        self.save_config();
                     }
                 }
             }
@@ -212,6 +245,9 @@ impl cosmic::Application for AppModel {
                 return if let Some(p) = self.popup.take() {
                     destroy_popup(p)
                 } else {
+                    // Check current widget status when opening popup
+                    self.widget_running = Self::check_widget_running();
+                    
                     let new_id = Id::unique();
                     self.popup.replace(new_id);
                     let mut popup_settings = self.core.applet.get_popup_settings(

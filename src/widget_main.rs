@@ -549,6 +549,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create widget
     let mut widget = MonitorWidget::new(&globals, &qh, config, config_handler);
     widget.create_layer_surface(&qh);
+    
+    // Perform initial roundtrip to receive configure event from compositor
+    log::info!("Waiting for compositor configure event...");
+    event_queue.roundtrip(&mut widget)?;
 
     log::info!("Widget initialized, entering main loop");
 
@@ -619,8 +623,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         log::trace!("Flush complete");
         
-        // Small sleep to avoid busy-waiting while staying responsive
-        std::thread::sleep(std::time::Duration::from_millis(16)); // ~60 FPS responsiveness
+        // Sleep to avoid busy-waiting and give compositor time to respond
+        // This also reduces CPU usage significantly
+        std::thread::sleep(std::time::Duration::from_millis(100)); // Check 10 times per second
 
         if widget.exit {
             log::info!("Exit requested, shutting down");

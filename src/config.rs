@@ -68,6 +68,8 @@ pub struct Config {
     pub widget_movable: bool,
     /// Order of widget sections
     pub section_order: Vec<WidgetSection>,
+    /// Auto-start widget when applet loads
+    pub widget_autostart: bool,
 }
 
 impl Default for Config {
@@ -99,6 +101,7 @@ impl Default for Config {
                 WidgetSection::Storage,
                 WidgetSection::Weather,
             ],
+            widget_autostart: true,
         }
     }
 }

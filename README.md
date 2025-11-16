@@ -101,11 +101,7 @@ Available options:
 - **Layout Order**: Customize the order in which sections appear in the widget (Utilization, Temperatures, Storage, Weather)
 - **Display Options**: Show/hide percentage values next to progress bars
 - **Update Interval**: 100-10000ms refresh rate
-- **Widget Position**: Precise X/Y coordinates (requires restart to apply)
-- **Weather Display**: Toggle weather information, configure OpenWeatherMap API key and location
-- **Display Options**: Show/hide percentage values next to progress bars
-- **Update Interval**: 100-10000ms refresh rate
-- **Widget Position**: Precise X/Y coordinates (requires restart to apply)
+- **Widget Position**: Precise X/Y coordinates, auto-start widget on login toggle
 
 ## Technical Details
 
