@@ -38,6 +38,7 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 cairo-rs = { version = "0.20", features = ["png"] }
 pango = "0.20"
 pangocairo = "0.20"
+libc = "0.2.177"
 
 [dependencies.i18n-embed]
 version = "0.16"

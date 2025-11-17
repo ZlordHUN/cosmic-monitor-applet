@@ -12,7 +12,8 @@ use widget::renderer::{render_widget, RenderParams};
 use widget::layout::calculate_widget_height;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use std::thread;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -522,117 +523,161 @@ impl ProvidesRegistryState for MonitorWidget {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Ignore SIGPIPE so a closed socket becomes a normal EPIPE result, not a signal
+    // This prevents the process from being killed when the compositor closes the connection
+    unsafe { 
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN); 
+    }
+    
     // Initialize logger
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .init();
     
     log::info!("Starting COSMIC Monitor Widget");
     
-    // Load configuration
+    // Load configuration once (will be reloaded on changes inside the loop)
     let config_handler = cosmic_config::Config::new(
         "com.github.zoliviragh.CosmicMonitor",
         Config::VERSION,
     )?;
     
-    let config = Config::get_entry(&config_handler).unwrap_or_default();
+    let mut base_config = Config::get_entry(&config_handler).unwrap_or_default();
     
-    log::info!("Widget starting with position: X={}, Y={}", config.widget_x, config.widget_y);
-    log::info!("Weather enabled: {}, API key set: {}", config.show_weather, !config.weather_api_key.is_empty());
+    log::info!("Widget starting with position: X={}, Y={}", base_config.widget_x, base_config.widget_y);
+    log::info!("Weather enabled: {}, API key set: {}", base_config.show_weather, !base_config.weather_api_key.is_empty());
 
-    // Connect to Wayland
-    let conn = Connection::connect_to_env()?;
-    let (globals, mut event_queue) = registry_queue_init(&conn)?;
-    let qh = event_queue.handle();
+    // RECONNECT LOOP - cycle through backoff intervals
+    let mut backoff_secs = [1_u64, 2, 5, 10, 20, 30].into_iter().cycle();
 
-    log::info!("Connected to Wayland server");
-
-    // Create widget
-    let mut widget = MonitorWidget::new(&globals, &qh, config, config_handler);
-    widget.create_layer_surface(&qh);
-    
-    // Perform initial roundtrip to receive configure event from compositor
-    log::info!("Waiting for compositor configure event...");
-    event_queue.roundtrip(&mut widget)?;
-
-    log::info!("Widget initialized, entering main loop");
-
-    let mut last_draw = Instant::now();
-
-    // Main event loop
-    loop {
-        let now = Instant::now();
+    'reconnect: loop {
+        log::info!("Connecting to Wayland...");
         
-        // Redraw every second for clock updates
-        if now.duration_since(last_draw).as_secs() >= 1 {
-            log::trace!("Redrawing widget");
-            widget.draw(&qh);
-            last_draw = now;
+        // Connect to Wayland
+        let conn = Connection::connect_to_env()?;
+        let (globals, mut event_queue) = registry_queue_init(&conn)?;
+        let qh = event_queue.handle();
+
+        log::info!("Connected to Wayland server");
+
+        // Create widget for this connection
+        let mut widget = MonitorWidget::new(&globals, &qh, base_config.clone(), config_handler.clone());
+        widget.create_layer_surface(&qh);
+        
+        // Perform initial roundtrip to receive configure event from compositor
+        log::info!("Waiting for compositor configure event...");
+        if let Err(e) = event_queue.roundtrip(&mut widget) {
+            log::warn!("Roundtrip failed: {}. Reconnecting...", e);
+            let d = Duration::from_secs(backoff_secs.next().unwrap());
+            thread::sleep(d);
+            continue 'reconnect;
         }
-        
-        // Check for config updates every 500ms
-        if now.duration_since(widget.last_config_check).as_millis() > 500 {
-            widget.last_config_check = now;
-            if let Ok(new_config) = Config::get_entry(&widget.config_handler) {
-                // Only update if config actually changed
-                if *widget.config != new_config {
-                    log::info!("Configuration changed, updating widget");
-                    // Update weather monitor if API key or location changed
-                    if widget.config.weather_api_key != new_config.weather_api_key {
-                        log::info!("Weather API key changed");
-                        widget.weather.set_api_key(new_config.weather_api_key.clone());
+
+        log::info!("Widget initialized, entering main loop");
+
+        let mut last_draw = Instant::now();
+        let mut last_heartbeat = Instant::now();
+
+        // INNER LOOP - one Wayland session
+        'session: loop {
+            let now = Instant::now();
+            
+            // Redraw every second for clock updates
+            if now.duration_since(last_draw).as_secs() >= 1 {
+                log::trace!("Redrawing widget");
+                widget.draw(&qh);
+                last_draw = now;
+            }
+            
+            // Check for config updates every 500ms
+            if now.duration_since(widget.last_config_check).as_millis() > 500 {
+                widget.last_config_check = now;
+                if let Ok(new_config) = Config::get_entry(&widget.config_handler) {
+                    // Only update if config actually changed
+                    if *widget.config != new_config {
+                        log::info!("Configuration changed, updating widget");
+                        
+                        // Keep latest config for future sessions
+                        base_config = new_config.clone();
+                        
+                        // Update weather monitor if API key or location changed
+                        if widget.config.weather_api_key != new_config.weather_api_key {
+                            log::info!("Weather API key changed");
+                            widget.weather.set_api_key(new_config.weather_api_key.clone());
+                        }
+                        if widget.config.weather_location != new_config.weather_location {
+                            log::info!("Weather location changed to: {}", new_config.weather_location);
+                            widget.weather.set_location(new_config.weather_location.clone());
+                        }
+                        
+                        widget.config = Arc::new(new_config);
+                        // Force a redraw
+                        widget.draw(&qh);
+                        last_draw = now; // Reset draw timer since we just drew
                     }
-                    if widget.config.weather_location != new_config.weather_location {
-                        log::info!("Weather location changed to: {}", new_config.weather_location);
-                        widget.weather.set_location(new_config.weather_location.clone());
-                    }
-                    
-                    widget.config = Arc::new(new_config);
-                    // Force a redraw
-                    widget.draw(&qh);
-                    last_draw = now; // Reset draw timer since we just drew
                 }
             }
-        }
 
-        // Dispatch pending events without blocking
-        log::trace!("Dispatching events");
-        if let Err(e) = event_queue.dispatch_pending(&mut widget) {
-            log::error!("Error dispatching events: {}", e);
-            // Broken pipe means compositor closed connection, exit gracefully
-            let error_str = format!("{}", e);
-            if error_str.contains("Broken pipe") || error_str.contains("os error 32") {
-                log::warn!("Broken pipe detected during dispatch, exiting gracefully");
-                break;
+            // First dispatch any pending events without blocking
+            log::trace!("Dispatching events");
+            if let Err(e) = event_queue.dispatch_pending(&mut widget) {
+                log::error!("Error dispatching events: {}", e);
+                
+                // Check for broken pipe in error message - reconnect if so
+                let error_str = e.to_string();
+                if error_str.contains("Broken pipe") || error_str.contains("os error 32") {
+                    log::warn!("Broken pipe during dispatch → reconnecting");
+                    break 'session;
+                }
+                
+                return Err(e.into());
             }
-            return Err(e.into());
-        }
-        log::trace!("Events dispatched");
-        
-        // CRITICAL: Always flush the connection to keep it alive
-        // Must call flush at least a few times per second according to Wayland best practices
-        log::trace!("Flushing connection");
-        if let Err(e) = conn.flush() {
-            log::error!("Error flushing connection: {}", e);
-            // Broken pipe means compositor closed connection, exit gracefully
-            let error_str = format!("{}", e);
-            if error_str.contains("Broken pipe") || error_str.contains("os error 32") {
-                log::warn!("Broken pipe while flushing connection, exiting gracefully");
-                break;
+            log::trace!("Events dispatched");
+            
+            // Aggressive heartbeat: send sync request every 10 seconds to prevent compositor timeout
+            // This keeps the connection alive without the widget disappearing
+            if now.duration_since(last_heartbeat) >= Duration::from_secs(10) {
+                log::info!("Sending heartbeat to compositor (keeping connection alive)");
+                if let Some(layer_surface) = &widget.layer_surface {
+                    let _ = conn.display().sync(&qh, layer_surface.wl_surface().clone());
+                }
+                last_heartbeat = now;
             }
-            return Err(e.into());
-        }
-        log::trace!("Flush complete");
-        
-        // Sleep to avoid busy-waiting and give compositor time to respond
-        // This also reduces CPU usage significantly
-        std::thread::sleep(std::time::Duration::from_millis(100)); // Check 10 times per second
+            
+            // Flush the event queue first
+            if let Err(e) = event_queue.flush() {
+                log::error!("Error flushing event queue: {}", e);
+                return Err(e.into());
+            }
+            
+            // Flush the connection to send any outgoing messages
+            log::trace!("Flushing connection");
+            if let Err(e) = conn.flush() {
+                log::error!("Error flushing connection: {}", e);
+                
+                // Check for broken pipe in error message - reconnect if so
+                let error_str = e.to_string();
+                if error_str.contains("Broken pipe") || error_str.contains("os error 32") {
+                    log::warn!("Broken pipe on flush → reconnecting");
+                    break 'session;
+                }
+                
+                return Err(e.into());
+            }
+            log::trace!("Flush complete");
+            
+            // Sleep to avoid busy-waiting
+            thread::sleep(Duration::from_millis(100));
 
-        if widget.exit {
-            log::info!("Exit requested, shutting down");
-            break;
-        }
+            if widget.exit {
+                log::info!("Exit requested, shutting down");
+                return Ok(());
+            }
+        } // end 'session
+
+        // Backoff then reconnect
+        let d = Duration::from_secs(backoff_secs.next().unwrap());
+        log::info!("Reconnecting in {:?}...", d);
+        thread::sleep(d);
+        // loop continues...
     }
-
-    log::info!("Widget exited cleanly");
-    Ok(())
 }
