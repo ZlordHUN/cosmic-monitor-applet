@@ -4,7 +4,7 @@ settings-name := 'cosmic-monitor-settings'
 appid := 'com.github.zoliviragh.CosmicMonitor'
 
 rootdir := ''
-prefix := '/usr'
+prefix := '/usr/local'
 
 # Installation paths
 base-dir := absolute_path(clean(rootdir / prefix))
