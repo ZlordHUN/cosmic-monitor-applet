@@ -453,7 +453,7 @@ impl MonitorWidget {
         let weather_icon = weather_icon.as_str();
 
         // Snapshot battery devices for this frame
-        let battery_devices = self.battery.devices().to_vec();
+        let battery_devices = self.battery.devices();
 
         let pool = self.pool.as_mut().unwrap();
 

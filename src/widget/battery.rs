@@ -9,6 +9,7 @@
 //! empty list.
 
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Representation of a single device's battery state
@@ -27,22 +28,24 @@ pub struct BatteryDevice {
     pub is_connected: bool,
 }
 
-/// Simple battery monitor that periodically queries Solaar
-#[derive(Debug, Clone)]
+/// Simple battery monitor that periodically queries Solaar in background
 pub struct BatteryMonitor {
-    devices: Vec<BatteryDevice>,
-    last_update: Option<Instant>,
+    devices: Arc<Mutex<Vec<BatteryDevice>>>,
+    last_update: Instant,
     /// Minimum interval between Solaar invocations
     refresh_interval: Duration,
-    is_first_update: bool,
+    update_requested: Arc<Mutex<bool>>,
 }
 
 impl BatteryMonitor {
     /// Create a new monitor with a sensible default refresh interval.
     pub fn new() -> Self {
+        // Initialize with 31 seconds ago to force immediate first update
+        let last_update = Instant::now() - Duration::from_secs(31);
+        
         // Load cached battery devices to show immediately
         let cache = super::cache::WidgetCache::load();
-        let devices: Vec<BatteryDevice> = cache
+        let cached_devices: Vec<BatteryDevice> = cache
             .battery_devices
             .iter()
             .map(|d| BatteryDevice {
@@ -50,23 +53,66 @@ impl BatteryMonitor {
                 level: None,
                 status: None,
                 kind: d.kind.clone(),
-                is_loading: false,
+                is_loading: true,
                 is_connected: false,
             })
             .collect();
+        
+        let devices = Arc::new(Mutex::new(cached_devices));
+        let update_requested = Arc::new(Mutex::new(false));
+        
+        // Spawn background thread for battery updates
+        let devices_clone = Arc::clone(&devices);
+        let update_requested_clone = Arc::clone(&update_requested);
+        
+        std::thread::spawn(move || {
+            let mut is_first_update = true;
+            
+            loop {
+                std::thread::sleep(Duration::from_secs(5));
+                
+                // Check if update is needed
+                let requested = {
+                    let mut req = update_requested_clone.lock().unwrap();
+                    if *req {
+                        *req = false;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                
+                if requested {
+                    match query_solaar() {
+                        Ok(new_devices) => {
+                            *devices_clone.lock().unwrap() = new_devices.clone();
+                            
+                            // Update cache after first successful update
+                            if is_first_update && !new_devices.is_empty() {
+                                let mut cache = super::cache::WidgetCache::load();
+                                cache.update_battery_devices(&new_devices);
+                                is_first_update = false;
+                            }
+                        }
+                        Err(_) => {
+                            // On error, keep previous data
+                        }
+                    }
+                }
+            }
+        });
             
         Self {
             devices,
-            last_update: None,
-            // Solaar does not need rapid polling; once every 30s is fine
+            last_update,
             refresh_interval: Duration::from_secs(30),
-            is_first_update: true,
+            update_requested,
         }
     }
 
     /// Current snapshot of devices (from the last successful update).
-    pub fn devices(&self) -> &[BatteryDevice] {
-        &self.devices
+    pub fn devices(&self) -> Vec<BatteryDevice> {
+        self.devices.lock().unwrap().clone()
     }
 
     /// Try to refresh device information if the refresh interval has elapsed.
@@ -75,29 +121,14 @@ impl BatteryMonitor {
     /// successful snapshot and return without propagating failures.
     pub fn update(&mut self) {
         let now = Instant::now();
-        if let Some(last) = self.last_update {
-            if now.duration_since(last) < self.refresh_interval {
-                return;
-            }
+        if now.duration_since(self.last_update) < self.refresh_interval {
+            return;
         }
 
-        self.last_update = Some(now);
+        self.last_update = now;
 
-        match query_solaar() {
-            Ok(devices) => {
-                self.devices = devices;
-                
-                // Update cache after first successful update
-                if self.is_first_update && !self.devices.is_empty() {
-                    let mut cache = super::cache::WidgetCache::load();
-                    cache.update_battery_devices(&self.devices);
-                    self.is_first_update = false;
-                }
-            }
-            Err(_err) => {
-                // On error, keep previous data and do nothing
-            }
-        }
+        // Request background thread to update
+        *self.update_requested.lock().unwrap() = true;
     }
 }
 
