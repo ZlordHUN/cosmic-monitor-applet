@@ -96,6 +96,10 @@ struct MonitorWidget {
     /// Collapsed notification groups (app names)
     collapsed_groups: std::collections::HashSet<String>,
     
+    /// Grouped notifications cache to avoid recomputing on every draw
+    grouped_notifications: Vec<(String, Vec<widget::notifications::Notification>)>,
+    notifications_version: u64,
+    
     /// Force redraw flag (set when notifications are cleared)
     force_redraw: bool,
     
@@ -134,7 +138,7 @@ impl CompositorHandler for MonitorWidget {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        self.draw(qh, chrono::Local::now());
+        self.draw(qh, chrono::Local::now(), true);
     }
 
     fn surface_enter(
@@ -207,7 +211,7 @@ impl LayerShellHandler for MonitorWidget {
         if configure.new_size.0 == 0 || configure.new_size.1 == 0 {
             // Use our default size
         }
-        self.draw(qh, chrono::Local::now());
+        self.draw(qh, chrono::Local::now(), true);
     }
 }
 
@@ -413,6 +417,8 @@ impl MonitorWidget {
             notification_clear_bounds: Vec::new(),
             clear_all_bounds: None,
             collapsed_groups: std::collections::HashSet::new(),
+            grouped_notifications: Vec::new(),
+            notifications_version: 0,
             force_redraw: false,
             last_click_time: Instant::now(),
             exit: false,
@@ -492,10 +498,45 @@ impl MonitorWidget {
             self.weather.update();
         }
         
+        // Update grouped notifications cache if notifications changed
+        if self.config.show_notifications {
+            self.update_notification_groups();
+        }
+        
         log::trace!("System stats update complete");
     }
+    
+    fn update_notification_groups(&mut self) {
+        let notifications = self.notifications.get_notifications();
+        let new_version = notifications.len() as u64;
+        
+        // Only recompute if notifications changed
+        if new_version != self.notifications_version {
+            use std::collections::HashMap;
+            
+            // Group notifications by app name
+            let mut grouped: HashMap<String, Vec<widget::notifications::Notification>> = HashMap::new();
+            for n in notifications {
+                grouped.entry(n.app_name.clone())
+                       .or_default()
+                       .push(n);
+            }
+            
+            // Convert to vec and sort by most recent notification
+            let mut groups: Vec<_> = grouped.into_iter().collect();
+            groups.sort_by(|a, b| {
+                let a_latest = a.1.iter().map(|n| n.timestamp).max().unwrap_or(0);
+                let b_latest = b.1.iter().map(|n| n.timestamp).max().unwrap_or(0);
+                b_latest.cmp(&a_latest)
+            });
+            
+            self.grouped_notifications = groups;
+            self.notifications_version = new_version;
+            log::trace!("Notification groups updated: {} groups", self.grouped_notifications.len());
+        }
+    }
 
-    fn draw(&mut self, _qh: &QueueHandle<Self>, current_time: chrono::DateTime<chrono::Local>) {
+    fn draw(&mut self, _qh: &QueueHandle<Self>, current_time: chrono::DateTime<chrono::Local>, update_stats: bool) {
         let layer_surface = match &self.layer_surface {
             Some(ls) => ls.clone(),
             None => {
@@ -504,7 +545,10 @@ impl MonitorWidget {
             }
         };
 
-        self.update_system_stats();
+        // Only update system stats for timed updates, not for UI-only redraws
+        if update_stats {
+            self.update_system_stats();
+        }
         
         // Calculate dynamic height based on enabled components
         let disk_count = if self.config.show_storage { self.storage.disk_info.len() } else { 0 };
@@ -570,8 +614,8 @@ impl MonitorWidget {
         // Snapshot battery devices for this frame
         let battery_devices = self.battery.devices();
         
-        // Get notifications
-        let notifications = self.notifications.get_notifications();
+        // Use cached grouped notifications (updated in update_system_stats)
+        let grouped_notifications = &self.grouped_notifications;
 
         let pool = self.pool.as_mut().unwrap();
 
@@ -613,7 +657,7 @@ impl MonitorWidget {
             weather_icon,
             disk_info: &self.storage.disk_info,
             battery_devices: &battery_devices,
-            notifications: &notifications,
+            grouped_notifications,
             collapsed_groups: &self.collapsed_groups,
             section_order: &self.config.section_order,
             current_time,
@@ -771,10 +815,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let current_second = display_time.format("%S").to_string();
             
             // Immediate redraw for notification interactions (independent of clock)
+            // Fast path: skip expensive system stats update for UI-only changes
             if widget.force_redraw {
-                widget.draw(&qh, display_time);
+                widget.draw(&qh, display_time, false);
                 widget.force_redraw = false;
-                log::debug!("Immediate notification redraw triggered");
+                log::debug!("Immediate notification redraw triggered (fast path - no stats update)");
             }
             
             // Check if the second has changed since last draw for regular updates
@@ -784,8 +829,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 true // First draw
             };
             
+            // Periodic full update with system stats
             if should_redraw {
-                widget.draw(&qh, display_time);
+                widget.draw(&qh, display_time, true);
                 widget.last_drawn_second = Some(current_second);
             }
             
@@ -811,8 +857,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         
                         widget.config = Arc::new(new_config);
-                        // Force a redraw
-                        widget.draw(&qh, chrono::Local::now());
+                        // Force a redraw with full stats update
+                        widget.draw(&qh, chrono::Local::now(), true);
                     }
                 }
             }

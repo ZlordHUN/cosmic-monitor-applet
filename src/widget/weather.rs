@@ -124,7 +124,7 @@ impl WeatherMonitor {
                         log::info!("Background: Fetching weather data for location: {}", location);
                         match Self::fetch_weather_static(&api_key, &location) {
                             Ok(data) => {
-                                log::info!("Background: Weather data fetched: {}°C, {}", data.temperature, data.description);
+                                log::info!("Background: Weather data fetched: {}°C, {} (icon: {})", data.temperature, data.description, data.icon);
                                 *weather_data_clone.lock().unwrap() = Some(data);
                             }
                             Err(e) => {

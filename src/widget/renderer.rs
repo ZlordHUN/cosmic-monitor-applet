@@ -49,7 +49,7 @@ pub struct RenderParams<'a> {
     pub weather_icon: &'a str,
     pub disk_info: &'a [DiskInfo],
     pub battery_devices: &'a [BatteryDevice],
-    pub notifications: &'a [Notification],
+    pub grouped_notifications: &'a [(String, Vec<Notification>)],
     pub collapsed_groups: &'a std::collections::HashSet<String>,
     pub section_order: &'a [WidgetSection],
     pub current_time: chrono::DateTime<chrono::Local>,
@@ -146,10 +146,10 @@ pub fn render_widget(canvas: &mut [u8], params: RenderParams) -> (Option<(f64, f
                     if params.show_notifications {
                         y_pos += 10.0; // Spacing before notifications section
                         let (new_y, bounds, groups, clear_bounds, clear_all) = render_notifications(
-                            &cr, 
-                            &layout, 
-                            y_pos, 
-                            params.notifications,
+                            &cr,
+                            &layout,
+                            y_pos,
+                            params.grouped_notifications,
                             params.collapsed_groups,
                         );
                         y_pos = new_y;
@@ -263,7 +263,7 @@ pub fn render_main_widget(canvas: &mut [u8], params: RenderParams) -> (Vec<(Stri
                 WidgetSection::Notifications => {
                     // Render notifications directly on main surface
                     if params.show_notifications {
-                        let (_new_y, _bounds, groups, clear_bounds, clear_all) = render_notifications(&cr, &layout, y_pos, params.notifications, params.collapsed_groups);
+                        let (_new_y, _bounds, groups, clear_bounds, clear_all) = render_notifications(&cr, &layout, y_pos, params.grouped_notifications, params.collapsed_groups);
                         notification_bounds = (groups, clear_bounds, clear_all);
                     }
                 }
@@ -281,7 +281,7 @@ pub fn render_notification_surface(
     canvas: &mut [u8], 
     width: i32,
     height: i32,
-    notifications: &[Notification],
+    grouped_notifications: &[(String, Vec<Notification>)],
     collapsed_groups: &std::collections::HashSet<String>,
 ) -> (Vec<(String, f64, f64)>, Vec<(String, f64, f64, f64, f64)>, Option<(f64, f64, f64, f64)>) {
     let surface = unsafe {
@@ -321,7 +321,7 @@ pub fn render_notification_surface(
             &cr, 
             &layout, 
             10.0,  // Start at top with small padding
-            notifications,
+            grouped_notifications,
             collapsed_groups,
         );
         
@@ -1157,11 +1157,10 @@ fn render_notifications(
     cr: &cairo::Context,
     layout: &pango::Layout,
     y_start: f64,
-    notifications: &[Notification],
+    grouped_notifications: &[(String, Vec<Notification>)],
     collapsed_groups: &std::collections::HashSet<String>,
 ) -> (f64, (f64, f64), Vec<(String, f64, f64)>, Vec<(String, f64, f64, f64, f64)>, Option<(f64, f64, f64, f64)>) {  
     // Returns (new_y_pos, (section_y_start, section_y_end), group_bounds, clear_button_bounds, clear_all_bounds)
-    use std::collections::HashMap;
     
     let section_start = y_start;
     let mut y_pos = y_start;
@@ -1182,7 +1181,7 @@ fn render_notifications(
     cr.fill().expect("Failed to fill");
     
     // Draw "Clear All" button if there are notifications
-    if !notifications.is_empty() {
+    if !grouped_notifications.is_empty() {
         let button_x = 285.0;
         let button_y = y_pos - 2.0;
         let button_width = 70.0;
@@ -1216,8 +1215,8 @@ fn render_notifications(
     
     y_pos += 25.0;
     
-    // Render each notification
-    if notifications.is_empty() {
+    // Render each notification group
+    if grouped_notifications.is_empty() {
         // Show "No notifications" message
         let font_desc = pango::FontDescription::from_string("Ubuntu Italic 11");
         layout.set_font_description(Some(&font_desc));
@@ -1232,24 +1231,8 @@ fn render_notifications(
         
         y_pos += 25.0;
     } else {
-        // Group notifications by app name
-        let mut grouped: HashMap<String, Vec<&Notification>> = HashMap::new();
-        for notif in notifications.iter() {
-            grouped.entry(notif.app_name.clone())
-                .or_insert_with(Vec::new)
-                .push(notif);
-        }
-        
-        // Sort groups by most recent notification
-        let mut groups: Vec<(String, Vec<&Notification>)> = grouped.into_iter().collect();
-        groups.sort_by(|a, b| {
-            let a_latest = a.1.iter().map(|n| n.timestamp).max().unwrap_or(0);
-            let b_latest = b.1.iter().map(|n| n.timestamp).max().unwrap_or(0);
-            b_latest.cmp(&a_latest)
-        });
-        
-        // Render each group
-        for (app_name, group_notifs) in groups.iter() {
+        // Render each pre-grouped notification group (already sorted)
+        for (app_name, group_notifs) in grouped_notifications.iter() {
             let group_y_start = y_pos;
             let is_collapsed = collapsed_groups.contains(app_name);
             
