@@ -113,6 +113,14 @@ pub fn calculate_widget_height_with_all(config: &Config, disk_count: usize, batt
         }
     }
     
+    // Media player section (Cider)
+    if config.show_media {
+        required_height += 10; // Spacing before header
+        required_height += 28; // "Now Playing" header
+        required_height += 130; // Panel height (title, artist, album, progress bar, time) + extra padding
+        required_height += 30; // Bottom padding after panel
+    }
+    
     required_height += 20; // Bottom padding
     
     required_height.max(100) // Minimum 100px height

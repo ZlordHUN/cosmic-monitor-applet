@@ -73,6 +73,7 @@ MonitorWidget struct
     ├── storage (disk usage)
     ├── battery (Solaar + HeadsetControl)
     ├── notifications (D-Bus monitoring)
+    ├── media (MediaMonitor - Cider API)
     ├── collapsed_groups (notification UI state)
     ├── last_update (for timing)
     └── last_config_check (for polling)
@@ -152,7 +153,16 @@ MonitorWidget struct
   - Keeps up to 5 most recent notifications in memory
   - Background thread continuously monitors D-Bus in separate process
   - Visual grouping with semi-transparent containers and borders
-  - Click group headers to toggle, right-click to clear all
+  - Clear All button in header to dismiss all notifications
+  - Individual X buttons to dismiss single notifications or entire groups
+  - Click group headers to toggle expand/collapse
+- Media: Cider Apple Music client integration via REST API
+  - Connects to Cider's local API at `http://localhost:10767`
+  - Polls `/api/v1/playback/now-playing` every 1 second
+  - Parses JSON response for track info (name, artistName, albumName, currentPlaybackTime, durationInMillis)
+  - Displays track title, artist, album, progress bar with time
+  - Supports API token authentication when enabled in Cider
+  - Falls back to empty display when Cider is not running
 - Weather: OpenWeatherMap API integration
   - Fetches temperature, conditions, and location data
   - Updates every 10 minutes
@@ -201,6 +211,8 @@ Settings Window (Scrollable)
 │   └── Weather Location (text input)
 ├── Notification Display
 │   └── Show Notifications (toggle)
+├── Media Display
+│   └── Show Media Player (toggle)
 ├── Layout Order
 │   ├── Section ordering with up/down arrow buttons
 │   └── Reorderable list: Utilization, Temperatures, Storage, Battery, Weather, Notifications
@@ -251,6 +263,9 @@ pub struct Config {
     weather_api_key: String,
     weather_location: String,
     show_notifications: bool,  // Notification monitoring
+    max_notifications: usize,   // Maximum notifications to display
+    show_media: bool,           // Media player display (Cider)
+    cider_api_token: String,    // Cider API token (empty if auth disabled)
     update_interval_ms: u64,
     show_percentages: bool,
     widget_x: i32,         // X position from left
@@ -266,6 +281,7 @@ pub enum WidgetSection {
     Battery,       // Battery monitoring for wireless devices
     Weather,       // Weather information display
     Notifications, // Desktop notifications
+    Media,         // Media player display (Cider)
 }
 ```
 
@@ -365,7 +381,7 @@ path = "src/settings_main.rs"
 - [ ] Actual network statistics (rx/tx bytes per second)
 - [ ] Actual disk I/O statistics
 - [ ] Storage temperature monitoring
-- [ ] AMD/Intel GPU monitoring support
+- [x] AMD/Intel GPU monitoring support (implemented via sysfs/radeontop/intel_gpu_top)
 - [ ] Graph visualizations (line graphs for trends)
 - [ ] Customizable colors/themes
 - [ ] Multiple widget instances with different configs
@@ -425,6 +441,7 @@ watch -n 0.5 cat ~/.config/cosmic/com.github.zoliviragh.CosmicMonitor/v1/config
 - `src/widget/storage.rs` - Storage/disk usage monitoring with lsblk integration
 - `src/widget/battery.rs` - Battery monitoring via Solaar (Logitech) and HeadsetControl (headsets) CLI integration
 - `src/widget/notifications.rs` - Desktop notification monitoring via D-Bus with busctl
+- `src/widget/media.rs` - Media player monitoring via Cider REST API
 - `src/widget/weather.rs` - OpenWeatherMap API integration with day/night icons
 - `src/widget/cache.rs` - Persistent cache for drives and peripherals
 - `src/widget/utilization.rs` - CPU, RAM, GPU monitoring with icon rendering

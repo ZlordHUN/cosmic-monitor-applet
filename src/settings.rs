@@ -75,6 +75,8 @@ pub struct SettingsApp {
     weather_location_input: String,
     /// Temporary state for max notifications input
     max_notifications_input: String,
+    /// Temporary state for Cider API token
+    cider_api_token_input: String,
     /// Cached battery devices
     cached_devices: Vec<CachedBatteryDevice>,
 }
@@ -101,6 +103,8 @@ pub enum Message {
     RemoveCachedDevice(usize),
     ToggleNotifications(bool),
     UpdateMaxNotifications(String),
+    ToggleMedia(bool),
+    UpdateCiderApiToken(String),
     UpdateInterval(String),
     UpdateX(String),
     UpdateY(String),
@@ -187,6 +191,12 @@ impl Application for SettingsApp {
             config.section_order.push(WidgetSection::Notifications);
         }
 
+        // Migrate old configs: add Media to section_order if missing
+        if !config.section_order.iter().any(|s| matches!(s, WidgetSection::Media)) {
+            // Add at the end
+            config.section_order.push(WidgetSection::Media);
+        }
+
         // Enable widget movement when settings window is open
         config.widget_movable = true;
         if let Some(ref handler) = config_handler {
@@ -199,6 +209,7 @@ impl Application for SettingsApp {
         let weather_api_key_input = config.weather_api_key.clone();
         let weather_location_input = config.weather_location.clone();
         let max_notifications_input = config.max_notifications.to_string();
+        let cider_api_token_input = config.cider_api_token.clone();
         
         // Load cached battery devices
         let cache = WidgetCache::load();
@@ -214,6 +225,7 @@ impl Application for SettingsApp {
             weather_api_key_input,
             weather_location_input,
             max_notifications_input,
+            cider_api_token_input,
             cached_devices,
         };
 
@@ -358,6 +370,19 @@ impl Application for SettingsApp {
                 widget::text_input("", &self.max_notifications_input)
                     .on_input(Message::UpdateMaxNotifications),
             ))
+            .push(widget::divider::horizontal::default())
+            .push(widget::text::heading("Media Player"))
+            .push(widget::settings::item(
+                "Show Media Player",
+                widget::toggler(self.config.show_media)
+                    .on_toggle(Message::ToggleMedia),
+            ))
+            .push(widget::settings::item(
+                "Cider API Token",
+                widget::text_input("Leave empty if auth disabled", &self.cider_api_token_input)
+                    .on_input(Message::UpdateCiderApiToken),
+            ))
+            .push(widget::text::body("Displays currently playing track from Cider (Apple Music client)"))
             .push(widget::divider::horizontal::default())
             .push(widget::text::heading(fl!("layout-order")))
             .push(widget::text::body(fl!("layout-order-description")));
@@ -522,6 +547,15 @@ impl Application for SettingsApp {
                         self.save_config();
                     }
                 }
+            }
+            Message::ToggleMedia(enabled) => {
+                self.config.show_media = enabled;
+                self.save_config();
+            }
+            Message::UpdateCiderApiToken(value) => {
+                self.cider_api_token_input = value.clone();
+                self.config.cider_api_token = value;
+                self.save_config();
             }
             Message::UpdateInterval(value) => {
                 self.interval_input = value.clone();

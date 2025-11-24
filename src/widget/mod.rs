@@ -12,6 +12,7 @@ pub mod layout;
 pub mod battery;
 pub mod cache;
 pub mod notifications;
+pub mod media;
 
 pub use utilization::UtilizationMonitor;
 pub use temperature::TemperatureMonitor;
@@ -21,3 +22,4 @@ pub use storage::StorageMonitor;
 pub use battery::{BatteryMonitor, BatteryDevice};
 pub use cache::WidgetCache;
 pub use notifications::NotificationMonitor;
+pub use media::{MediaMonitor, MediaInfo, PlaybackStatus};

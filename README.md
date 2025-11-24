@@ -8,6 +8,8 @@
 
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
+![Widget Screenshot](screenshots/Screenshot_2025-11-25_00-47-55.png)
+
 </div>
 
 ---
@@ -30,6 +32,7 @@ A borderless floating widget that displays real-time system statistics for the C
 - **Multi-Vendor GPU Support**: Automatic detection and monitoring for NVIDIA (nvidia-smi), AMD (sysfs/radeontop), and Intel (sysfs/intel_gpu_top) GPUs
 - **Storage Monitoring**: Displays disk usage for system drives and external media with intelligent labeling (vendor + model names)
 - **Battery Monitoring**: Shows battery status for Logitech wireless devices (via Solaar) and gaming headsets (via HeadsetControl) with color-coded vertical battery icons, connection status, and immediate startup rendering
+- **Media Player Integration**: Real-time display of currently playing track from Cider (Apple Music client) with artist, album, progress bar, and playback time
 - **Persistent Cache**: Remembers drives and peripherals to instantly display placeholders while loading fresh data
 - **Customizable Position**: Precise X/Y positioning via settings window
 - **Configurable Display**: Toggle individual stats (CPU, RAM, GPU, clock, date, temperatures, notifications), show/hide percentage values
@@ -104,7 +107,8 @@ Available options:
 - **Widget Display**: Toggle clock (12/24-hour format) and date displays independently
 - **Weather Display**: Toggle weather information, configure OpenWeatherMap API key and location (includes day/night icon variants)
 - **Notification Display**: Toggle notification monitoring with grouped display by application
-- **Layout Order**: Customize the order in which sections appear in the widget (Utilization, Temperatures, Storage, Battery, Weather, Notifications)
+- **Media Display**: Toggle media player information display (currently supports Cider Apple Music client)
+- **Layout Order**: Customize the order in which sections appear in the widget (Utilization, Temperatures, Storage, Battery, Weather, Notifications, Media)
 - **Display Options**: Show/hide percentage values next to progress bars
 - **Update Interval**: 100-10000ms refresh rate
 - **Widget Position**: Precise X/Y coordinates, auto-start widget on login toggle
@@ -194,6 +198,37 @@ The widget will display:
 - "Connecting..." status while retrieving battery data
 - Cached device information for instant display on startup
 
+## Media Player Setup
+
+To enable media player display (currently supports Cider):
+
+### Installing Cider
+
+[Cider](https://cider.sh/) is an open-source Apple Music client for Linux.
+
+1. Install Cider from their website or your package manager
+2. Sign in with your Apple Music account
+
+### Enabling the Cider API
+
+1. Open Cider settings
+2. Navigate to the Connectivity section
+3. Enable "Enable WebSocket API" or "Enable Remote API"
+4. If using API authentication, generate an API token
+
+### Configuring the Widget
+
+1. Open Settings from the applet menu
+2. Navigate to the Media Player section
+3. Enable "Show Media Player"
+4. If Cider requires an API token, enter it in the "Cider API Token" field (leave empty if authentication is disabled in Cider)
+
+The widget will display:
+- Track title, artist, and album
+- Playback status icon (play/pause)
+- Progress bar with current time and duration
+- "Cider" label indicating the player source
+
 ### Supported Devices
 
 **Logitech** (via Solaar): Any wireless device that Solaar can detect (mice, keyboards, trackballs, etc.)
@@ -224,7 +259,9 @@ The widget can monitor and display desktop notifications in real-time:
 - **Recent First**: Groups are sorted by most recent notification
 - **Notification Details**: Shows app name, summary, and body text (truncated if too long)
 - **Persistent Display**: Keeps up to 5 notifications visible at once
-- **Clear Action**: Right-click anywhere in the notifications section to clear all
+- **Clear All Button**: Red "Clear All" button in the header to dismiss all notifications at once
+- **Individual Dismiss**: Each notification and group has an X button to dismiss individually
+- **Group Dismiss**: X button on group headers clears all notifications from that application
 
 ### Enabling Notifications
 
@@ -235,10 +272,12 @@ The widget can monitor and display desktop notifications in real-time:
 
 ### Using Notification Groups
 
-- **Collapsed groups** show: "▶ AppName (count)"
+- **Collapsed groups** show: "▶ AppName (count)" with an X button to clear the group
 - **Expanded groups** show: "▼ AppName (count)" with individual notification details
 - **Left-click** a group header to toggle expand/collapse
-- **Right-click** anywhere in the notifications section to clear all notifications
+- **Click the X button** on a group header to clear all notifications from that app
+- **Click the X button** on an individual notification to dismiss just that one
+- **Click "Clear All"** button in the header to dismiss all notifications
 
 The grouping feature is especially useful when receiving multiple notifications from the same application, as it keeps the widget compact while still showing all information when needed.
 

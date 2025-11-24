@@ -12,6 +12,7 @@ pub enum WidgetSection {
     Battery,
     Weather,
     Notifications,
+    Media,
 }
 
 impl WidgetSection {
@@ -23,6 +24,7 @@ impl WidgetSection {
             WidgetSection::Battery => "Battery",
             WidgetSection::Weather => "Weather",
             WidgetSection::Notifications => "Notifications",
+            WidgetSection::Media => "Media Player",
         }
     }
 }
@@ -82,6 +84,10 @@ pub struct Config {
     pub show_notifications: bool,
     /// Maximum number of notifications to display
     pub max_notifications: usize,
+    /// Show media player section
+    pub show_media: bool,
+    /// Cider API token (leave empty if authentication is disabled)
+    pub cider_api_token: String,
 }
 
 impl Default for Config {
@@ -114,12 +120,15 @@ impl Default for Config {
                 WidgetSection::Battery,
                 WidgetSection::Weather,
                 WidgetSection::Notifications,
+                WidgetSection::Media,
             ],
             widget_autostart: true,
             show_battery: false,
             enable_solaar_integration: false,
             show_notifications: false,
             max_notifications: 5,
+            show_media: false,
+            cider_api_token: String::new(),
         }
     }
 }

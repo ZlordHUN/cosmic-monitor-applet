@@ -13,6 +13,7 @@ use super::weather::draw_weather_icon;
 use super::storage::DiskInfo;
 use super::battery::BatteryDevice;
 use super::notifications::Notification;
+use super::media::MediaInfo;
 use crate::config::WidgetSection;
 
 /// Parameters for rendering the widget
@@ -42,6 +43,7 @@ pub struct RenderParams<'a> {
     pub show_weather: bool,
     pub show_battery: bool,
     pub show_notifications: bool,
+    pub show_media: bool,
     pub enable_solaar_integration: bool,
     pub weather_temp: f32,
     pub weather_desc: &'a str,
@@ -51,6 +53,7 @@ pub struct RenderParams<'a> {
     pub battery_devices: &'a [BatteryDevice],
     pub grouped_notifications: &'a [(String, Vec<Notification>)],
     pub collapsed_groups: &'a std::collections::HashSet<String>,
+    pub media_info: &'a MediaInfo,
     pub section_order: &'a [WidgetSection],
     pub current_time: chrono::DateTime<chrono::Local>,
 }
@@ -159,6 +162,12 @@ pub fn render_widget(canvas: &mut [u8], params: RenderParams) -> (Option<(f64, f
                         clear_all_bounds = clear_all;
                     }
                 }
+                WidgetSection::Media => {
+                    if params.show_media {
+                        y_pos += 10.0; // Spacing before media section
+                        y_pos = render_media(&cr, &layout, y_pos, params.media_info);
+                    }
+                }
             }
         }
         
@@ -263,8 +272,15 @@ pub fn render_main_widget(canvas: &mut [u8], params: RenderParams) -> (Vec<(Stri
                 WidgetSection::Notifications => {
                     // Render notifications directly on main surface
                     if params.show_notifications {
-                        let (_new_y, _bounds, groups, clear_bounds, clear_all) = render_notifications(&cr, &layout, y_pos, params.grouped_notifications, params.collapsed_groups);
+                        let (new_y, _bounds, groups, clear_bounds, clear_all) = render_notifications(&cr, &layout, y_pos, params.grouped_notifications, params.collapsed_groups);
+                        y_pos = new_y;  // Update y_pos so next section knows where to start
                         notification_bounds = (groups, clear_bounds, clear_all);
+                    }
+                }
+                WidgetSection::Media => {
+                    if params.show_media {
+                        y_pos += 10.0;
+                        y_pos = render_media(&cr, &layout, y_pos, params.media_info);
                     }
                 }
             }
@@ -1414,4 +1430,208 @@ fn render_notifications(
     
     y_pos += 10.0; // Section padding
     (y_pos, (section_start, y_pos), group_bounds, clear_button_bounds, clear_all_bounds)
+}
+
+/// Render media player section
+fn render_media(
+    cr: &cairo::Context,
+    layout: &pango::Layout,
+    y_start: f64,
+    media_info: &MediaInfo,
+) -> f64 {
+    use super::media::PlaybackStatus;
+    
+    let mut y_pos = y_start;
+    
+    // Draw section header
+    let font_desc = pango::FontDescription::from_string("Ubuntu Bold 14");
+    layout.set_font_description(Some(&font_desc));
+    layout.set_text("Now Playing");
+    
+    cr.move_to(10.0, y_pos);
+    pangocairo::functions::layout_path(cr, layout);
+    cr.set_source_rgb(0.0, 0.0, 0.0);
+    cr.stroke_preserve().expect("Failed to stroke");
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    cr.fill().expect("Failed to fill");
+    
+    y_pos += 28.0;  // More space after header
+    
+    // Check if there's an active player
+    if !media_info.is_active() {
+        let font_desc = pango::FontDescription::from_string("Ubuntu Italic 11");
+        layout.set_font_description(Some(&font_desc));
+        layout.set_text("No media playing");
+        
+        cr.move_to(15.0, y_pos);
+        pangocairo::functions::layout_path(cr, layout);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.stroke_preserve().expect("Failed to stroke");
+        cr.set_source_rgb(0.6, 0.6, 0.6);
+        cr.fill().expect("Failed to fill");
+        
+        return y_pos + 25.0;
+    }
+    
+    // Draw background panel
+    let panel_height = 105.0;
+    let panel_y = y_pos;
+    cr.set_source_rgba(0.1, 0.1, 0.15, 0.7);
+    cr.rectangle(10.0, panel_y, 360.0, panel_height);
+    cr.fill().expect("Failed to fill background");
+    
+    cr.set_source_rgba(0.3, 0.3, 0.4, 0.9);
+    cr.set_line_width(1.5);
+    cr.rectangle(10.0, panel_y, 360.0, panel_height);
+    cr.stroke().expect("Failed to stroke border");
+    
+    // Content starts inside the panel with padding
+    y_pos += 10.0;
+    
+    // Draw playback status icon (play/pause)
+    let icon_x = 25.0;
+    let icon_y = y_pos + 5.0;
+    let icon_size = 20.0;
+    
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    cr.set_line_width(2.0);
+    
+    match media_info.status {
+        PlaybackStatus::Playing => {
+            // Draw pause icon (two vertical bars)
+            cr.rectangle(icon_x, icon_y, 6.0, icon_size);
+            cr.fill().expect("Failed to fill");
+            cr.rectangle(icon_x + 10.0, icon_y, 6.0, icon_size);
+            cr.fill().expect("Failed to fill");
+        }
+        PlaybackStatus::Paused => {
+            // Draw play icon (triangle)
+            cr.move_to(icon_x, icon_y);
+            cr.line_to(icon_x, icon_y + icon_size);
+            cr.line_to(icon_x + icon_size, icon_y + icon_size / 2.0);
+            cr.close_path();
+            cr.fill().expect("Failed to fill");
+        }
+        PlaybackStatus::Stopped => {
+            // Draw stop icon (square)
+            cr.rectangle(icon_x, icon_y, icon_size, icon_size);
+            cr.fill().expect("Failed to fill");
+        }
+    }
+    
+    // Draw track title
+    let text_x = 55.0;
+    let font_desc_bold = pango::FontDescription::from_string("Ubuntu Bold 12");
+    layout.set_font_description(Some(&font_desc_bold));
+    
+    let title = if media_info.title.len() > 35 {
+        format!("{}...", &media_info.title[..32])
+    } else {
+        media_info.title.clone()
+    };
+    layout.set_text(&title);
+    
+    cr.move_to(text_x, y_pos);
+    pangocairo::functions::layout_path(cr, layout);
+    cr.set_source_rgb(0.0, 0.0, 0.0);
+    cr.stroke_preserve().expect("Failed to stroke");
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    cr.fill().expect("Failed to fill");
+    
+    // Draw artist
+    if !media_info.artist.is_empty() {
+        y_pos += 18.0;
+        
+        let font_desc = pango::FontDescription::from_string("Ubuntu 11");
+        layout.set_font_description(Some(&font_desc));
+        
+        let artist = if media_info.artist.len() > 40 {
+            format!("{}...", &media_info.artist[..37])
+        } else {
+            media_info.artist.clone()
+        };
+        layout.set_text(&artist);
+        
+        cr.move_to(text_x, y_pos);
+        pangocairo::functions::layout_path(cr, layout);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.stroke_preserve().expect("Failed to stroke");
+        cr.set_source_rgb(0.8, 0.8, 0.8);
+        cr.fill().expect("Failed to fill");
+    }
+    
+    // Draw album (if present)
+    if !media_info.album.is_empty() {
+        y_pos += 16.0;
+        
+        let font_desc_small = pango::FontDescription::from_string("Ubuntu Italic 10");
+        layout.set_font_description(Some(&font_desc_small));
+        
+        let album = if media_info.album.len() > 45 {
+            format!("{}...", &media_info.album[..42])
+        } else {
+            media_info.album.clone()
+        };
+        layout.set_text(&album);
+        
+        cr.move_to(text_x, y_pos);
+        pangocairo::functions::layout_path(cr, layout);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.stroke_preserve().expect("Failed to stroke");
+        cr.set_source_rgb(0.6, 0.6, 0.6);
+        cr.fill().expect("Failed to fill");
+    }
+    
+    // Draw progress bar
+    y_pos += 22.0;
+    let bar_x = 15.0;
+    let bar_width = 310.0;
+    let bar_height = 6.0;
+    
+    // Background bar
+    cr.set_source_rgba(0.3, 0.3, 0.3, 0.8);
+    cr.rectangle(bar_x, y_pos, bar_width, bar_height);
+    cr.fill().expect("Failed to fill progress background");
+    
+    // Progress fill
+    let progress = media_info.progress();
+    if progress > 0.0 {
+        cr.set_source_rgba(0.4, 0.6, 1.0, 0.9); // Blue progress
+        cr.rectangle(bar_x, y_pos, bar_width * progress, bar_height);
+        cr.fill().expect("Failed to fill progress");
+    }
+    
+    // Progress bar border
+    cr.set_source_rgba(0.5, 0.5, 0.5, 0.8);
+    cr.set_line_width(1.0);
+    cr.rectangle(bar_x, y_pos, bar_width, bar_height);
+    cr.stroke().expect("Failed to stroke progress border");
+    
+    // Draw time
+    y_pos += 12.0;
+    let font_desc_time = pango::FontDescription::from_string("Ubuntu 9");
+    layout.set_font_description(Some(&font_desc_time));
+    
+    let time_str = format!("{} / {}", media_info.position_str(), media_info.duration_str());
+    layout.set_text(&time_str);
+    
+    cr.move_to(bar_x, y_pos);
+    pangocairo::functions::layout_path(cr, layout);
+    cr.set_source_rgb(0.0, 0.0, 0.0);
+    cr.stroke_preserve().expect("Failed to stroke");
+    cr.set_source_rgb(0.7, 0.7, 0.7);
+    cr.fill().expect("Failed to fill");
+    
+    // Draw player name on the right
+    layout.set_text(&media_info.player_name);
+    let (text_width, _) = layout.pixel_size();
+    cr.move_to(bar_x + bar_width - text_width as f64, y_pos);
+    pangocairo::functions::layout_path(cr, layout);
+    cr.set_source_rgb(0.0, 0.0, 0.0);
+    cr.stroke_preserve().expect("Failed to stroke");
+    cr.set_source_rgb(0.5, 0.5, 0.5);
+    cr.fill().expect("Failed to fill");
+    
+    // Return position after the panel with some padding
+    panel_y + panel_height + 15.0
 }

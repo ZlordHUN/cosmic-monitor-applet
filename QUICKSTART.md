@@ -101,6 +101,9 @@ Configuration fields:
 - `show_weather` - Toggle weather display
 - `weather_api_key`, `weather_location` - OpenWeatherMap configuration
 - `show_notifications` - Toggle notification monitoring
+- `max_notifications` - Maximum number of notifications to display (1-20)
+- `show_media` - Toggle media player display (Cider)
+- `cider_api_token` - Cider API token (leave empty if authentication is disabled)
 - `update_interval_ms` - Update frequency (100-10000)
 - `show_percentages` - Display percentage values
 - `section_order` - Customizable ordering of widget sections
@@ -194,13 +197,22 @@ The widget will display battery status for all detected Logitech wireless device
 - Widget captures new notifications as they arrive (doesn't show old ones)
 
 ### Notifications not clearing
-- Right-click anywhere in the notifications section to clear all
-- If widget crashes when clicking, restart it and ensure you're using the latest version
+- Click the "Clear All" button in the notifications header to clear all
+- Click the X button on a group header to clear all notifications from that app
+- Click the X button on individual notifications to dismiss them one by one
 
 ### Notification groups not expanding/collapsing
 - Click directly on the group header (app name line with ▶/▼)
 - Left-click toggles expand/collapse
-- Ensure widget_movable is disabled (left-click is used for both dragging and group toggling)
+- Use X buttons to dismiss individual notifications or groups
+- Use "Clear All" button in header to dismiss all notifications
+
+### Media player not showing
+- Make sure Cider is running and playing music
+- Check that Cider's API is enabled in its settings (Connectivity section)
+- Verify "Show Media Player" is enabled in Widget Settings
+- If Cider requires API authentication, ensure the token is configured
+- Check if Cider's API is accessible: `curl http://localhost:10767/api/v1/playback/now-playing`
 
 ## Development
 

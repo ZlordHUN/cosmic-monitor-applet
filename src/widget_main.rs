@@ -7,7 +7,7 @@ mod config;
 mod widget;
 
 use config::Config;
-use widget::{UtilizationMonitor, TemperatureMonitor, NetworkMonitor, WeatherMonitor, StorageMonitor, BatteryMonitor, NotificationMonitor, load_weather_font};
+use widget::{UtilizationMonitor, TemperatureMonitor, NetworkMonitor, WeatherMonitor, StorageMonitor, BatteryMonitor, NotificationMonitor, MediaMonitor, load_weather_font};
 use widget::renderer::{render_widget, RenderParams};
 use widget::layout::calculate_widget_height_with_all;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -65,6 +65,7 @@ struct MonitorWidget {
     storage: StorageMonitor,
     battery: BatteryMonitor,
     notifications: NotificationMonitor,
+    media: MediaMonitor,
     last_update: Instant,
     
     /// Memory pool for rendering
@@ -400,6 +401,11 @@ impl MonitorWidget {
         // Clone weather config values before moving config
         let weather_api_key = config.weather_api_key.clone();
         let weather_location = config.weather_location.clone();
+        let cider_api_token = if config.cider_api_token.is_empty() {
+            None
+        } else {
+            Some(config.cider_api_token.clone())
+        };
 
         Self {
             registry_state,
@@ -419,6 +425,7 @@ impl MonitorWidget {
             storage: StorageMonitor::new(),
             battery: BatteryMonitor::new(),
             notifications: NotificationMonitor::new(5), // Keep last 5 notifications
+            media: MediaMonitor::new(cider_api_token),
             last_update: Instant::now(),
             pool: None,
             last_height: WIDGET_HEIGHT,
@@ -638,6 +645,9 @@ impl MonitorWidget {
             .create_buffer(width, height, stride, wl_shm::Format::Argb8888)
             .expect("Failed to create buffer");
 
+        // Get media info
+        let media_info = self.media.get_media_info();
+        
         // Use Cairo for rendering
         let params = RenderParams {
             width,
@@ -665,6 +675,7 @@ impl MonitorWidget {
             show_weather,
             show_battery,
             show_notifications: self.config.show_notifications,
+            show_media: self.config.show_media,
             enable_solaar_integration,
             weather_temp,
             weather_desc,
@@ -674,6 +685,7 @@ impl MonitorWidget {
             battery_devices: &battery_devices,
             grouped_notifications,
             collapsed_groups: &self.collapsed_groups,
+            media_info: &media_info,
             section_order: &self.config.section_order,
             current_time,
         };
