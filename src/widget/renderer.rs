@@ -615,7 +615,7 @@ fn render_circular_temps(
         let (label_width, _) = layout.pixel_size();
         cr.move_to(
             x_offset + circle_radius - label_width as f64 / 2.0,
-            y + circle_diameter + 2.0
+            y + circle_diameter + 6.0
         );
         pangocairo::functions::layout_path(cr, layout);
         cr.set_source_rgb(0.0, 0.0, 0.0);
@@ -656,7 +656,7 @@ fn render_circular_temps(
         let (label_width, _) = layout.pixel_size();
         cr.move_to(
             x_offset + circle_radius - label_width as f64 / 2.0,
-            y + circle_diameter + 2.0
+            y + circle_diameter + 6.0
         );
         pangocairo::functions::layout_path(cr, layout);
         cr.set_source_rgb(0.0, 0.0, 0.0);
@@ -1051,7 +1051,7 @@ fn render_weather(
     draw_weather_icon(cr, 10.0, y, icon_size, params.weather_icon);
     
     // Weather info to the right of icon
-    let info_x = 60.0;
+    let info_x = 70.0;
     let font_desc = pango::FontDescription::from_string("Ubuntu 14");
     layout.set_font_description(Some(&font_desc));
     

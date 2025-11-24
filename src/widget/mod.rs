@@ -16,7 +16,7 @@ pub mod notifications;
 pub use utilization::UtilizationMonitor;
 pub use temperature::TemperatureMonitor;
 pub use network::NetworkMonitor;
-pub use weather::WeatherMonitor;
+pub use weather::{WeatherMonitor, load_weather_font};
 pub use storage::StorageMonitor;
 pub use battery::{BatteryMonitor, BatteryDevice};
 pub use cache::WidgetCache;

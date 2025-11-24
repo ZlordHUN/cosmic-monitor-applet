@@ -148,14 +148,14 @@ Weather updates every 10 minutes and displays:
 - Current temperature
 - Weather description
 - Location name
-- Dynamic icon based on conditions with full day/night variants:
-  - Clear sky: ☀ (day) / 🌙 (night)
-  - Few clouds: 🌤 (day) / 🌙☁ (night)
-  - Scattered clouds: ☁ (day) / ☁🌙 (night)
-  - Rain: 🌦 (day) / 🌧🌙 (night)
-  - Thunderstorm: ⛈ (day) / ⛈🌙 (night)
-  - Snow: ❄ (day) / ❄🌙 (night)
-  - Fog: 🌫 (day) / 🌫🌙 (night)
+- Dynamic icons using [Weather Icons](https://github.com/erikflowers/weather-icons) font with full day/night variants:
+  - Clear sky: Sunny (day) / Moon (night)
+  - Few clouds: Day cloudy (day) / Night partly cloudy (night)
+  - Scattered clouds: Day sunny overcast (day) / Night partly cloudy (night)
+  - Rain: Day rain (day) / Night rain (night)
+  - Thunderstorm: Day thunderstorm (day) / Night thunderstorm (night)
+  - Snow: Day snow (day) / Night snow (night)
+  - Fog: Day fog (day) / Night fog (night)
 
 ## Battery Monitoring Setup
 
@@ -261,3 +261,5 @@ MPL-2.0
 ## Credits
 
 Built for the [COSMIC Desktop](https://github.com/pop-os/cosmic-epoch) by System76.
+
+Weather icons by [Erik Flowers](https://github.com/erikflowers/weather-icons) (SIL OFL 1.1 License).

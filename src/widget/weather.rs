@@ -6,6 +6,27 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+// Weather Icons font embedded in binary
+const WEATHER_ICONS_FONT: &[u8] = include_bytes!("../../resources/weathericons.ttf");
+
+// Load the Weather Icons font into Cairo/Pango
+pub fn load_weather_font() {
+    use std::io::Write;
+    use std::fs;
+    
+    // Create a temporary file for the font (Pango needs a file path)
+    let cache_dir = dirs::cache_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let font_path = cache_dir.join("cosmic-monitor-weathericons.ttf");
+    
+    // Write font to cache if it doesn't exist or is outdated
+    if !font_path.exists() || fs::metadata(&font_path).map(|m| m.len()).unwrap_or(0) != WEATHER_ICONS_FONT.len() as u64 {
+        if let Ok(mut file) = fs::File::create(&font_path) {
+            let _ = file.write_all(WEATHER_ICONS_FONT);
+            log::info!("Weather Icons font loaded from embedded data to {:?}", font_path);
+        }
+    }
+}
+
 // OpenWeatherMap API response structures
 #[derive(Debug, Deserialize)]
 struct OpenWeatherResponse {
@@ -214,27 +235,28 @@ pub fn draw_weather_icon(cr: &cairo::Context, x: f64, y: f64, size: f64, icon_co
     let condition = if icon_code.len() >= 2 { &icon_code[0..2] } else { "01" };
     let is_day = icon_code.ends_with('d');
     
-    // Use emoji/unicode symbols for clear, visible icons
-    let icon_text = match condition {
-        "01" => if is_day { "☀" } else { "🌙" },      // Clear sky - sun or moon
-        "02" => if is_day { "🌤" } else { "🌙☁" },    // Few clouds - sun/moon with cloud
-        "03" => if is_day { "☁" } else { "☁🌙" },     // Scattered clouds - cloud with moon at night
-        "04" => "☁",                                   // Broken/overcast clouds (same day/night)
-        "09" => if is_day { "🌧" } else { "🌧🌙" },   // Shower rain - with moon at night
-        "10" => if is_day { "🌦" } else { "🌧🌙" },   // Rain - sun/moon with rain
-        "11" => if is_day { "⛈" } else { "⛈🌙" },    // Thunderstorm - with moon at night
-        "13" => if is_day { "❄" } else { "❄🌙" },     // Snow - with moon at night
-        "50" => if is_day { "🌫" } else { "🌫🌙" },   // Mist/fog - with moon at night
-        _ => "☁",                                      // Default to cloud
+    // Map OpenWeatherMap icon codes to Weather Icons font Unicode characters
+    // Reference: https://erikflowers.github.io/weather-icons/
+    let icon_char = match condition {
+        "01" => if is_day { "\u{f00d}" } else { "\u{f02e}" },  // wi-day-sunny / wi-night-clear
+        "02" => if is_day { "\u{f002}" } else { "\u{f086}" },  // wi-day-cloudy / wi-night-alt-cloudy
+        "03" => if is_day { "\u{f013}" } else { "\u{f031}" },  // wi-day-sunny-overcast / wi-night-partly-cloudy
+        "04" => "\u{f041}",                                     // wi-cloudy (same day/night)
+        "09" => if is_day { "\u{f009}" } else { "\u{f029}" },  // wi-day-showers / wi-night-alt-showers
+        "10" => if is_day { "\u{f008}" } else { "\u{f028}" },  // wi-day-rain / wi-night-alt-rain
+        "11" => if is_day { "\u{f010}" } else { "\u{f02d}" },  // wi-day-thunderstorm / wi-night-alt-thunderstorm
+        "13" => if is_day { "\u{f00a}" } else { "\u{f02a}" },  // wi-day-snow / wi-night-alt-snow
+        "50" => if is_day { "\u{f003}" } else { "\u{f04a}" },  // wi-day-fog / wi-night-fog
+        _ => "\u{f041}",                                        // Default to wi-cloudy
     };
     
     // Create pango layout for text rendering
     let layout = pangocairo::functions::create_layout(cr);
     
-    // Use a large font size for the emoji
-    let font_desc = pango::FontDescription::from_string(&format!("Ubuntu {}", (size * 0.8) as i32));
+    // Use the Weather Icons font
+    let font_desc = pango::FontDescription::from_string(&format!("Weather Icons {}", (size * 0.9) as i32));
     layout.set_font_description(Some(&font_desc));
-    layout.set_text(icon_text);
+    layout.set_text(icon_char);
     
     // Get text dimensions for centering
     let (text_width, text_height) = layout.pixel_size();

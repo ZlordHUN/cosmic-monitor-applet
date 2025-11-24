@@ -7,7 +7,7 @@ mod config;
 mod widget;
 
 use config::Config;
-use widget::{UtilizationMonitor, TemperatureMonitor, NetworkMonitor, WeatherMonitor, StorageMonitor, BatteryMonitor, NotificationMonitor};
+use widget::{UtilizationMonitor, TemperatureMonitor, NetworkMonitor, WeatherMonitor, StorageMonitor, BatteryMonitor, NotificationMonitor, load_weather_font};
 use widget::renderer::{render_widget, RenderParams};
 use widget::layout::calculate_widget_height_with_all;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -696,6 +696,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     
     log::info!("Starting COSMIC Monitor Widget");
+    
+    // Load Weather Icons font
+    load_weather_font();
     
     // Load configuration once (will be reloaded on changes inside the loop)
     let config_handler = cosmic_config::Config::new(
