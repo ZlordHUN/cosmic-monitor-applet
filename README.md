@@ -67,17 +67,18 @@ cargo build --release
 sudo just install
 
 # Or install manually
-sudo install -Dm755 target/release/cosmic-monitor-applet /usr/bin/cosmic-monitor-applet
-sudo install -Dm755 target/release/cosmic-monitor-widget /usr/bin/cosmic-monitor-widget
+sudo install -Dm755 target/release/cosmic-monitor-applet /usr/local/bin/cosmic-monitor-applet
+sudo install -Dm755 target/release/cosmic-monitor-widget /usr/local/bin/cosmic-monitor-widget
 sudo install -Dm755 target/release/cosmic-monitor-settings /usr/local/bin/cosmic-monitor-settings
 
 # Install desktop files and icon
-sudo install -Dm644 resources/app.desktop /usr/share/applications/com.github.zoliviragh.CosmicMonitor.desktop
-sudo install -Dm644 resources/settings.desktop /usr/share/applications/com.github.zoliviragh.CosmicMonitor.Settings.desktop
-sudo install -Dm644 resources/icon.svg /usr/share/icons/hicolor/scalable/apps/com.github.zoliviragh.CosmicMonitor.svg
+sudo install -Dm644 resources/app.desktop /usr/local/share/applications/com.github.zoliviragh.CosmicMonitor.desktop
+sudo install -Dm644 resources/settings.desktop /usr/local/share/applications/com.github.zoliviragh.CosmicMonitor.Settings.desktop
+sudo install -Dm644 resources/icon.svg /usr/local/share/icons/hicolor/scalable/apps/com.github.zoliviragh.CosmicMonitor.svg
 
-# Update icon cache
-sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor
+# Update desktop database and icon cache
+sudo update-desktop-database /usr/local/share/applications
+sudo gtk-update-icon-cache -f -t /usr/local/share/icons/hicolor
 ```
 
 ## Usage
