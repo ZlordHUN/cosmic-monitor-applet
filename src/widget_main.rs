@@ -292,7 +292,7 @@ impl PointerHandler for MonitorWidget {
                                 // Make sure we're not clicking the X button area
                                 // X button is at x=340, with radius 7, so roughly 333-347
                                 if click_x < 333.0 {
-                                    log::info!("Toggling notification group: {} at ({}, {})", app_name, click_x, click_y);
+                                    log::debug!("Toggling notification group: {}", app_name);
                                     if self.collapsed_groups.contains(app_name) {
                                         self.collapsed_groups.remove(app_name);
                                     } else {
@@ -442,8 +442,9 @@ impl MonitorWidget {
         layer_surface.set_exclusive_zone(-1); // Don't reserve space
         log::debug!("Setting layer surface margins: top={}, left={}", self.config.widget_y, self.config.widget_x);
         layer_surface.set_margin(self.config.widget_y, 0, 0, self.config.widget_x);
+        // Use OnDemand to get input focus when clicked - improves input responsiveness
         layer_surface.set_keyboard_interactivity(
-            smithay_client_toolkit::shell::wlr_layer::KeyboardInteractivity::None
+            smithay_client_toolkit::shell::wlr_layer::KeyboardInteractivity::OnDemand
         );
         
         layer_surface.commit();
@@ -664,9 +665,11 @@ impl MonitorWidget {
         };
         
         // Wrap rendering in panic catch to prevent crashes
+        let render_start = Instant::now();
         let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             render_widget(canvas, params)
         }));
+        log::info!("Cairo render took: {:?}", render_start.elapsed());
         
         match render_result {
             Ok((bounds, groups, clear_bounds, clear_all)) => {
@@ -695,8 +698,6 @@ impl MonitorWidget {
         
         // Commit changes
         layer_surface.wl_surface().commit();
-        
-        log::trace!("Frame rendered and committed successfully");
     }
 }
 
@@ -790,21 +791,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         'session: loop {
             let now = Instant::now();
             
-            // First dispatch any pending events without blocking
-            log::trace!("Dispatching events");
-            if let Err(e) = event_queue.dispatch_pending(&mut widget) {
-                log::error!("Error dispatching events: {}", e);
+            // Use roundtrip instead of dispatch_pending to force compositor to send events
+            // This is more aggressive but ensures we get input events immediately
+            log::trace!("Roundtrip to get events");
+            if let Err(e) = event_queue.roundtrip(&mut widget) {
+                log::error!("Error in roundtrip: {}", e);
                 
                 // Check for broken pipe in error message - reconnect if so
                 let error_str = e.to_string();
                 if error_str.contains("Broken pipe") || error_str.contains("os error 32") {
-                    log::warn!("Broken pipe during dispatch → reconnecting");
+                    log::warn!("Broken pipe during roundtrip → reconnecting");
                     break 'session;
                 }
                 
                 return Err(e.into());
             }
-            log::trace!("Events dispatched");
+            log::trace!("Roundtrip complete");
             
             // Redraw when the clock second changes (synchronized with system time)
             let current_time = chrono::Local::now();
@@ -819,7 +821,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if widget.force_redraw {
                 widget.draw(&qh, display_time, false);
                 widget.force_redraw = false;
-                log::debug!("Immediate notification redraw triggered (fast path - no stats update)");
+                // Immediately flush to ensure compositor receives the update
+                let _ = conn.flush();
             }
             
             // Check if the second has changed since last draw for regular updates
@@ -863,22 +866,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Aggressive heartbeat: force a roundtrip every 5 seconds to keep compositor connection alive
-            // This actually waits for the compositor response, proving the connection works
+            // Heartbeat tracking (roundtrip already happens every loop, just log occasionally)
             if now.duration_since(last_heartbeat) >= Duration::from_secs(5) {
-                log::info!("Sending heartbeat roundtrip to compositor");
-                if let Err(e) = event_queue.roundtrip(&mut widget) {
-                    log::error!("Heartbeat roundtrip failed: {}", e);
-                    
-                    // Check for broken pipe - reconnect if so
-                    let error_str = e.to_string();
-                    if error_str.contains("Broken pipe") || error_str.contains("os error 32") {
-                        log::warn!("Broken pipe on heartbeat → reconnecting");
-                        break 'session;
-                    }
-                    
-                    return Err(e.into());
-                }
+                log::info!("Heartbeat: widget still running");
                 last_heartbeat = now;
             }
             
