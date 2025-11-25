@@ -1,20 +1,72 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Battery monitoring via Solaar CLI
+//! # Battery Monitoring Module (External Devices)
 //!
-//! This module provides a minimal wrapper that shells out to the
-//! `solaar` command to obtain battery information for Logitech
-//! devices. It is intentionally conservative: if Solaar is not
-//! installed or returns unexpected output, we simply return an
-//! empty list.
+//! This module monitors battery levels for external peripherals like wireless mice,
+//! keyboards, and headsets. It uses external CLI tools rather than system battery
+//! APIs since these are for USB dongles, not laptop batteries.
+//!
+//! ## Supported Tools
+//!
+//! - **Solaar**: Logitech device manager for Unifying/Bolt receivers
+//! - **HeadsetControl**: Battery status for gaming headsets (SteelSeries, Corsair, etc.)
+//!
+//! ## Data Flow
+//!
+//! ```text
+//! ┌─────────────────┐    ┌──────────────────┐    ┌───────────────────┐
+//! │  Background     │    │                  │    │                   │
+//! │  Thread         │───►│  Arc<Mutex>      │───►│  Main Thread      │
+//! │  (query tools)  │    │  (shared state)  │    │  (reads devices)  │
+//! └─────────────────┘    └──────────────────┘    └───────────────────┘
+//! ```
+//!
+//! ## Architecture
+//!
+//! The monitor uses a background thread to periodically call Solaar and HeadsetControl:
+//!
+//! 1. **Startup**: Load cached device names for instant display
+//! 2. **First update**: Immediately query tools in background thread
+//! 3. **Periodic updates**: Request updates every 30 seconds via `update()`
+//! 4. **Background execution**: Actual tool queries run in separate thread to avoid blocking
+//!
+//! ## Parsing Strategies
+//!
+//! - **Solaar JSON**: Preferred, uses `solaar show --json`
+//! - **Solaar text**: Fallback, parses `solaar show` plain text output
+//! - **HeadsetControl**: Uses `headsetcontrol -b -o json`
+//!
+//! ## Error Handling
+//!
+//! All external tool failures are silently ignored to maintain stability:
+//! - Tool not installed → empty device list
+//! - Parse failure → keep previous snapshot
+//! - Device disconnected → device shows as not connected
 
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Representation of a single device's battery state
+// ============================================================================
+// Battery Device Struct
+// ============================================================================
+
+/// Information about a single peripheral device's battery state.
+///
+/// Represents battery data from Logitech devices (via Solaar) or gaming
+/// headsets (via HeadsetControl).
+///
+/// # Fields
+///
+/// - `name`: Device product name (e.g., "G309 LIGHTSPEED", "Arctis Nova 7")
+/// - `level`: Battery percentage 0-100, None if unavailable
+/// - `status`: Text status like "discharging", "charging", "good"
+/// - `kind`: Device type - "mouse", "keyboard", "headset"
+/// - `is_loading`: True while waiting for first real data (showing cached)
+/// - `is_connected`: False if device is paired but powered off/out of range
 #[derive(Debug, Clone)]
 pub struct BatteryDevice {
+    /// Device product name from Solaar/HeadsetControl
     pub name: String,
     /// Battery level in percent (0-100) if available
     pub level: Option<u8>,
@@ -22,38 +74,77 @@ pub struct BatteryDevice {
     pub status: Option<String>,
     /// Device kind (e.g. "mouse", "keyboard", "headset")
     pub kind: Option<String>,
-    /// True if showing cached data while loading
+    /// True if showing cached data while loading real data
     pub is_loading: bool,
-    /// True if device is currently connected (Device path != None)
+    /// True if device is currently connected and responding
     pub is_connected: bool,
 }
 
-/// Simple battery monitor that periodically queries Solaar in background
+// ============================================================================
+// Battery Monitor Struct
+// ============================================================================
+
+/// Monitors battery levels for external peripherals via CLI tools.
+///
+/// Uses Solaar (Logitech devices) and HeadsetControl (gaming headsets) to
+/// query battery status. All queries run in a background thread to avoid
+/// blocking the main render loop.
+///
+/// # Threading Model
+///
+/// - `devices`: Shared state protected by Arc<Mutex>
+/// - `update_requested`: Flag to trigger background refresh
+/// - Background thread polls flag every 5 seconds
+/// - Main thread calls `update()` every 30 seconds to set flag
+///
+/// # Caching
+///
+/// Device names and types are cached to disk so the widget can show
+/// meaningful device names immediately on startup, even before Solaar
+/// has time to respond.
 pub struct BatteryMonitor {
+    /// Shared device list, updated by background thread
     devices: Arc<Mutex<Vec<BatteryDevice>>>,
+    /// Last time `update()` was called (for rate limiting)
     last_update: Instant,
-    /// Minimum interval between Solaar invocations
+    /// Minimum interval between requesting Solaar updates (30 seconds)
     refresh_interval: Duration,
+    /// Flag to signal background thread that an update is needed
     update_requested: Arc<Mutex<bool>>,
 }
 
 impl BatteryMonitor {
-    /// Create a new monitor with a sensible default refresh interval.
+    /// Create a new battery monitor with background polling thread.
+    ///
+    /// # Initialization Steps
+    ///
+    /// 1. Load cached device info from disk (shows instantly)
+    /// 2. Set `last_update` to 31 seconds ago to trigger immediate first update
+    /// 3. Spawn background thread for tool queries
+    /// 4. Background thread immediately queries Solaar/HeadsetControl
+    /// 5. Cache updated on first successful query
+    ///
+    /// # Background Thread Behavior
+    ///
+    /// - Sleeps for 5 seconds between checks
+    /// - Only queries tools when `update_requested` flag is set
+    /// - On error, keeps previous device snapshot
     pub fn new() -> Self {
         // Initialize with 31 seconds ago to force immediate first update
         let last_update = Instant::now() - Duration::from_secs(31);
         
         // Load cached battery devices to show immediately
+        // This provides instant display while real data loads
         let cache = super::cache::WidgetCache::load();
         let cached_devices: Vec<BatteryDevice> = cache
             .battery_devices
             .iter()
             .map(|d| BatteryDevice {
                 name: d.name.clone(),
-                level: None,
+                level: None,  // No cached level, will show "loading"
                 status: None,
                 kind: d.kind.clone(),
-                is_loading: true,
+                is_loading: true,  // Mark as loading until real data arrives
                 is_connected: false,
             })
             .collect();
@@ -62,6 +153,7 @@ impl BatteryMonitor {
         let update_requested = Arc::new(Mutex::new(true)); // Request initial update immediately
         
         // Spawn background thread for battery updates
+        // This avoids blocking the main render loop on slow CLI tools
         let devices_clone = Arc::clone(&devices);
         let update_requested_clone = Arc::clone(&update_requested);
         
@@ -81,17 +173,18 @@ impl BatteryMonitor {
                     }
                 }
                 Err(_) => {
-                    // On error, keep cached data
+                    // On error, keep cached data - tool may not be installed
                 }
             }
             
             // Clear the initial update request flag
             *update_requested_clone.lock().unwrap() = false;
             
+            // Main background loop - check for update requests every 5 seconds
             loop {
                 std::thread::sleep(Duration::from_secs(5));
                 
-                // Check if update is needed
+                // Check if update is needed (atomic check-and-clear)
                 let requested = {
                     let mut req = update_requested_clone.lock().unwrap();
                     if *req {
@@ -130,15 +223,24 @@ impl BatteryMonitor {
         }
     }
 
-    /// Current snapshot of devices (from the last successful update).
+    /// Get current snapshot of battery devices.
+    ///
+    /// Returns a clone of the device list from the last successful update.
+    /// Thread-safe via internal mutex.
     pub fn devices(&self) -> Vec<BatteryDevice> {
         self.devices.lock().unwrap().clone()
     }
 
-    /// Try to refresh device information if the refresh interval has elapsed.
+    /// Request a battery update if refresh interval has elapsed.
     ///
-    /// This is intentionally best-effort: on any error, we keep the last
-    /// successful snapshot and return without propagating failures.
+    /// This is rate-limited to once per 30 seconds. The actual update runs
+    /// in the background thread - this just sets a flag.
+    ///
+    /// # Rate Limiting
+    ///
+    /// Battery queries are expensive (spawn external processes), so we
+    /// limit updates to every 30 seconds. Battery levels don't change
+    /// fast enough to need more frequent polling.
     pub fn update(&mut self) {
         let now = Instant::now();
         if now.duration_since(self.last_update) < self.refresh_interval {
@@ -147,17 +249,34 @@ impl BatteryMonitor {
 
         self.last_update = now;
 
-        // Request background thread to update
+        // Request background thread to update (non-blocking)
         *self.update_requested.lock().unwrap() = true;
     }
 }
 
-/// Invoke the `solaar` CLI and parse battery information, plus HeadsetControl for headsets
+// ============================================================================
+// External Tool Query Functions
+// ============================================================================
+
+/// Query Solaar and HeadsetControl for battery information.
+///
+/// Aggregates devices from multiple sources:
+/// 1. Solaar JSON output (preferred for Logitech devices)
+/// 2. Solaar text output (fallback)
+/// 3. HeadsetControl JSON output (gaming headsets)
+///
+/// # Returns
+///
+/// Combined list of all discovered devices, or empty list on failure.
 fn query_solaar() -> Result<Vec<BatteryDevice>, String> {
     let mut all_devices = Vec::new();
     
-    // Query Solaar for Logitech devices
+    // ========================================================================
+    // Solaar Query (Logitech devices)
+    // ========================================================================
+    
     // Try JSON output if available (newer Solaar versions)
+    // JSON is more reliable and structured than text output
     if let Ok(output) = Command::new("solaar").arg("show").arg("--json").output() {
         if output.status.success() {
             if let Ok(text) = String::from_utf8(output.stdout) {
@@ -169,6 +288,7 @@ fn query_solaar() -> Result<Vec<BatteryDevice>, String> {
     }
 
     // Fallback: plain-text `solaar show` if JSON didn't give us devices
+    // Older Solaar versions don't support JSON output
     if all_devices.is_empty() {
         if let Ok(output) = Command::new("solaar").arg("show").output() {
             if output.status.success() {
@@ -179,7 +299,12 @@ fn query_solaar() -> Result<Vec<BatteryDevice>, String> {
         }
     }
     
-    // Query HeadsetControl for headset devices
+    // ========================================================================
+    // HeadsetControl Query (gaming headsets)
+    // ========================================================================
+    
+    // HeadsetControl supports many gaming headset brands
+    // -b: battery only, -o json: JSON output format
     if let Ok(output) = Command::new("headsetcontrol").arg("-b").arg("-o").arg("json").output() {
         if output.status.success() {
             if let Ok(text) = String::from_utf8(output.stdout) {
@@ -193,16 +318,24 @@ fn query_solaar() -> Result<Vec<BatteryDevice>, String> {
     Ok(all_devices)
 }
 
-/// Parse a very small subset of Solaar's JSON output.
+// ============================================================================
+// Solaar JSON Parsing
+// ============================================================================
+
+/// Parse Solaar's JSON output format.
 ///
-/// We avoid pulling in a full JSON dependency specific to Solaar's
-/// schema by using `serde_json::Value` and walking only what we need.
+/// Solaar JSON can be either:
+/// - Array of device objects
+/// - Object keyed by device ID
+///
+/// We use `serde_json::Value` for flexible parsing without strict schema.
 fn parse_solaar_json(text: &str) -> Result<Vec<BatteryDevice>, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
 
     let mut devices = Vec::new();
 
     match value {
+        // Array format: [{device1}, {device2}, ...]
         serde_json::Value::Array(items) => {
             for item in items {
                 if let Some(dev) = extract_device_from_json(&item) {
@@ -210,8 +343,8 @@ fn parse_solaar_json(text: &str) -> Result<Vec<BatteryDevice>, String> {
                 }
             }
         }
+        // Object format: {"id1": {device1}, "id2": {device2}, ...}
         serde_json::Value::Object(map) => {
-            // Some Solaar versions may return an object keyed by device
             for (_key, item) in map {
                 if let Some(dev) = extract_device_from_json(&item) {
                     devices.push(dev);
@@ -224,6 +357,12 @@ fn parse_solaar_json(text: &str) -> Result<Vec<BatteryDevice>, String> {
     Ok(devices)
 }
 
+/// Extract a BatteryDevice from a Solaar JSON device object.
+///
+/// Looks for fields:
+/// - `name`: Device product name
+/// - `kind`: Device type (mouse, keyboard)
+/// - `battery` or `batteries`: Battery level and status
 fn extract_device_from_json(value: &serde_json::Value) -> Option<BatteryDevice> {
     let name = value
         .get("name")
@@ -236,10 +375,11 @@ fn extract_device_from_json(value: &serde_json::Value) -> Option<BatteryDevice> 
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Heuristic: some structures nest battery info under `battery` or `batteries`.
+    // Heuristic: some structures nest battery info under `battery` or `batteries`
     let (level, status) = if let Some(batt) = value.get("battery") {
         extract_battery_fields(batt)
     } else if let Some(batts) = value.get("batteries") {
+        // Multiple batteries - take the first one
         if let Some(first) = batts.as_array().and_then(|a| a.first()) {
             extract_battery_fields(first)
         } else {
@@ -252,6 +392,11 @@ fn extract_device_from_json(value: &serde_json::Value) -> Option<BatteryDevice> 
     Some(BatteryDevice { name, level, status, kind, is_loading: false, is_connected: true })
 }
 
+/// Extract battery level and status from a JSON battery object.
+///
+/// Looks for:
+/// - `level`: Numeric percentage (0-100)
+/// - `status` or `state`: Text status like "discharging"
 fn extract_battery_fields(value: &serde_json::Value) -> (Option<u8>, Option<String>) {
     let level = value
         .get("level")
@@ -267,7 +412,24 @@ fn extract_battery_fields(value: &serde_json::Value) -> (Option<u8>, Option<Stri
     (level, status)
 }
 
-/// Parse HeadsetControl JSON output
+// ============================================================================
+// HeadsetControl JSON Parsing
+// ============================================================================
+
+/// Parse HeadsetControl's JSON output format.
+///
+/// HeadsetControl output structure:
+/// ```json
+/// {
+///   "devices": [
+///     {
+///       "status": "success",
+///       "device": "Arctis Nova 7",
+///       "battery": {"status": "BATTERY_AVAILABLE", "level": 85}
+///     }
+///   ]
+/// }
+/// ```
 fn parse_headsetcontrol_json(text: &str) -> Result<Vec<BatteryDevice>, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     
@@ -278,7 +440,7 @@ fn parse_headsetcontrol_json(text: &str) -> Result<Vec<BatteryDevice>, String> {
             // Check if device query was successful
             if let Some(status) = device_obj.get("status").and_then(|v| v.as_str()) {
                 if status != "success" {
-                    continue;
+                    continue;  // Skip failed device queries
                 }
             }
             
@@ -303,6 +465,7 @@ fn parse_headsetcontrol_json(text: &str) -> Result<Vec<BatteryDevice>, String> {
                     }
                 });
                 
+                // HeadsetControl uses "BATTERY_AVAILABLE" status
                 let is_available = status == Some("BATTERY_AVAILABLE");
                 let status_text = if is_available {
                     Some("available".to_string())
@@ -316,7 +479,7 @@ fn parse_headsetcontrol_json(text: &str) -> Result<Vec<BatteryDevice>, String> {
             };
             
             // HeadsetControl reports the device even if not connected to the dongle
-            // Only mark as connected if battery is available
+            // Only mark as connected if battery is available (device is powered on)
             let is_connected = is_battery_available;
             let is_loading = is_connected && level.is_none();
             
@@ -334,11 +497,29 @@ fn parse_headsetcontrol_json(text: &str) -> Result<Vec<BatteryDevice>, String> {
     Ok(devices)
 }
 
-/// Very small text parser for `solaar show` plain-text output.
+// ============================================================================
+// Solaar Text Parsing (Fallback)
+// ============================================================================
+
+/// Parse `solaar show` plain-text output (fallback for older versions).
 ///
-/// This is intentionally forgiving and only looks for lines like:
-///   "  Battery: 90% (discharging)"
-/// and preceding indented device lines as the device name.
+/// Example output format:
+/// ```text
+/// Unifying Receiver
+///   Device path  : /dev/hidraw0
+///   ...
+///   1: G309 LIGHTSPEED
+///         Device path  : /dev/hidraw1
+///         ...
+///         Battery: 90% (discharging)
+/// ```
+///
+/// # Parsing Strategy
+///
+/// 1. Look for device names starting with "N: Device Name" pattern
+/// 2. Track current device context
+/// 3. Extract "Kind:" and "Battery:" fields within device section
+/// 4. Avoid duplicates (same device can appear multiple times)
 fn parse_solaar_text(text: &str) -> Vec<BatteryDevice> {
     let mut devices = Vec::new();
     let mut current_name: Option<String> = None;
@@ -357,7 +538,7 @@ fn parse_solaar_text(text: &str) -> Vec<BatteryDevice> {
         if line.starts_with("  ") && !line.starts_with("    ") {
             if let Some(colon_pos) = line.find(':') {
                 let before_colon = &line[..colon_pos].trim();
-                // Check if it's a number (device identifier)
+                // Check if it's a number (device identifier like "1", "2", etc.)
                 if before_colon.chars().all(|c| c.is_ascii_digit()) {
                     let after_colon = &line[colon_pos + 1..].trim();
                     current_name = Some(after_colon.to_string());
@@ -374,7 +555,6 @@ fn parse_solaar_text(text: &str) -> Vec<BatteryDevice> {
         }
 
         // Look for device kind (e.g., "Kind: mouse")
-        // This appears in the detailed device info
         if trimmed.starts_with("Kind:") {
             if let Some(kind_value) = trimmed.strip_prefix("Kind:") {
                 current_kind = Some(kind_value.trim().to_string());
@@ -382,7 +562,7 @@ fn parse_solaar_text(text: &str) -> Vec<BatteryDevice> {
         }
 
         // Look for a battery line under the current device
-        // This can appear either in features or at the end of device section
+        // Format: "Battery: 90% (discharging)"
         if trimmed.starts_with("Battery:") {
             if let Some(rest) = trimmed.strip_prefix("Battery:") {
                 let (level, status) = parse_battery_line(rest.trim());
@@ -414,12 +594,15 @@ fn parse_solaar_text(text: &str) -> Vec<BatteryDevice> {
     devices
 }
 
+/// Parse a battery line from Solaar text output.
+///
+/// # Example Formats
+///
+/// - `"90% (discharging)"` → (Some(90), Some("discharging"))
+/// - `"55%, recharging."` → (Some(55), Some("recharging"))
+/// - `"charged"` → (None, Some("charged"))
+/// - `"good"` → (None, Some("good"))
 fn parse_battery_line(text: &str) -> (Option<u8>, Option<String>) {
-    // Example formats:
-    //   "90% (discharging)"
-    //   "55%, recharging."
-    //   "charged" or "good"
-
     let mut level: Option<u8> = None;
     let mut status: Option<String> = None;
 
@@ -443,3 +626,4 @@ fn parse_battery_line(text: &str) -> (Option<u8>, Option<String>) {
 
     (level, status)
 }
+

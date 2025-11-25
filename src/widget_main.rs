@@ -1,7 +1,65 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Widget implementation using Wayland layer-shell protocol
-//! This bypasses the compositor's window management to achieve borderless rendering
+//! COSMIC Monitor Widget - Standalone Desktop Widget
+//!
+//! This is the main entry point for the desktop monitoring widget. Unlike the
+//! panel applet, this widget uses Wayland's layer-shell protocol to render
+//! directly on the desktop, bypassing normal window management.
+//!
+//! # Binary
+//!
+//! Compiles to `cosmic-monitor-widget`, typically installed to `/usr/bin/`.
+//! Can be launched via:
+//! - Panel applet "Show Widget" button
+//! - Auto-start when applet loads (if configured)
+//! - Direct command line invocation
+//!
+//! # Architecture
+//!
+//! The widget uses smithay-client-toolkit to interact with Wayland:
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────────────────┐
+//! │                        MonitorWidget                             │
+//! ├──────────────────────────────────────────────────────────────────┤
+//! │  Wayland State                                                   │
+//! │  ├── LayerShell        (for desktop overlay positioning)        │
+//! │  ├── CompositorState   (surface management)                     │
+//! │  ├── ShmHandler        (shared memory buffers for rendering)    │
+//! │  └── SeatState         (input handling: mouse, keyboard)        │
+//! ├──────────────────────────────────────────────────────────────────┤
+//! │  Monitor Modules                                                 │
+//! │  ├── UtilizationMonitor  (CPU, Memory, GPU usage)               │
+//! │  ├── TemperatureMonitor  (CPU/GPU temps from hwmon/nvidia-smi)  │
+//! │  ├── StorageMonitor      (disk space from mount points)         │
+//! │  ├── BatteryMonitor      (system + Solaar Bluetooth devices)    │
+//! │  ├── WeatherMonitor      (OpenWeatherMap API)                   │
+//! │  ├── NotificationMonitor (D-Bus notifications)                  │
+//! │  └── MediaMonitor        (Cider Apple Music client)             │
+//! └──────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Event Loop
+//!
+//! The main loop:
+//! 1. Polls Wayland for events (input, configure, etc.)
+//! 2. Updates system statistics at the configured interval
+//! 3. Re-renders when the clock second changes
+//! 4. Handles click events for notifications and media controls
+//! 5. Checks for configuration changes every 500ms
+//!
+//! # Layer Shell
+//!
+//! The widget uses wlr-layer-shell to:
+//! - Position at an absolute X,Y coordinate on the desktop
+//! - Stay above regular windows (Layer::Top)
+//! - Not reserve exclusive space (other windows can overlap)
+//! - Accept mouse input for dragging (when settings is open) and clicks
+//!
+//! # Reconnection
+//!
+//! If the Wayland connection is lost (compositor restart, etc.), the widget
+//! automatically attempts to reconnect with exponential backoff.
 
 mod config;
 mod widget;
@@ -15,6 +73,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::thread;
 
+// smithay-client-toolkit provides Rust-friendly wrappers around Wayland protocols
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
@@ -38,80 +97,140 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Fixed widget width in pixels (height is dynamic based on content)
 const WIDGET_WIDTH: u32 = 370;
+/// Default/initial widget height (recalculated based on enabled sections)
 const WIDGET_HEIGHT: u32 = 400;
 
+// ============================================================================
+// Main Widget State Structure
+// ============================================================================
+
+/// Main state structure for the monitoring widget.
+///
+/// Holds all Wayland protocol state, monitoring modules, and UI state.
+/// This struct implements multiple Wayland handler traits to receive
+/// compositor events.
 struct MonitorWidget {
+    // === Wayland Protocol State ===
+    // These are required by smithay-client-toolkit for Wayland communication
+    
+    /// Global registry for discovering Wayland interfaces
     registry_state: RegistryState,
+    /// Information about available outputs (monitors)
     output_state: OutputState,
+    /// Wayland compositor interface for surface creation
     compositor_state: CompositorState,
+    /// Shared memory interface for buffer allocation
     shm_state: Shm,
+    /// Layer shell interface for desktop overlay surfaces
     layer_shell: LayerShell,
+    /// Seat interface for input devices
     seat_state: SeatState,
     
-    /// The main surface for rendering
+    /// The layer surface we render to (created after initialization)
     layer_surface: Option<LayerSurface>,
     
-    /// Configuration
+    // === Configuration ===
+    
+    /// Current widget configuration (shared reference for thread safety)
     config: Arc<Config>,
+    /// Handle to cosmic-config for saving position changes during drag
     config_handler: cosmic_config::Config,
+    /// Last time we checked for config changes
     last_config_check: Instant,
     
-    /// System monitoring modules
+    // === System Monitoring Modules ===
+    // Each module is responsible for collecting and caching specific metrics
+    
+    /// CPU, Memory, and GPU utilization percentages
     utilization: UtilizationMonitor,
+    /// CPU and GPU temperatures from sensors
     temperature: TemperatureMonitor,
+    /// Network upload/download rates (currently unused in UI)
     network: NetworkMonitor,
+    /// Weather data from OpenWeatherMap API
     weather: WeatherMonitor,
+    /// Mounted disk space information
     storage: StorageMonitor,
+    /// Battery levels from system and Solaar
     battery: BatteryMonitor,
+    /// D-Bus desktop notifications
     notifications: NotificationMonitor,
+    /// Now playing from Cider
     media: MediaMonitor,
+    /// Last time system stats were updated
     last_update: Instant,
     
-    /// Memory pool for rendering
+    // === Rendering State ===
+    
+    /// Shared memory pool for Wayland buffer allocation
     pool: Option<SlotPool>,
-    
-    /// Track last widget height for resizing
+    /// Last rendered height (for detecting resize needs)
     last_height: u32,
-    
-    /// Track last drawn second to synchronize clock updates
+    /// Last drawn clock second (for sync'd updates)
     last_drawn_second: Option<String>,
     
-    /// Mouse dragging state
+    // === Mouse Interaction State ===
+    
+    /// Whether user is currently dragging the widget
     dragging: bool,
+    /// Starting X position of drag operation
     drag_start_x: f64,
+    /// Starting Y position of drag operation
     drag_start_y: f64,
     
-    /// Notification section bounds (y_start, y_end)
+    // === Click Detection Bounds ===
+    // These are populated by the renderer and used for hit testing
+    
+    /// Vertical bounds of the notification section (y_start, y_end)
     notification_bounds: Option<(f64, f64)>,
-    
-    /// Group bounds for notifications [(app_name, y_start, y_end)]
+    /// Bounds of notification group headers for collapse toggle
+    /// Format: [(app_name, y_start, y_end)]
     notification_group_bounds: Vec<(String, f64, f64)>,
-    
-    /// Clear button bounds for each group [(app_name, x_start, y_start, x_end, y_end)]
+    /// Bounds of X buttons for clearing groups/notifications
+    /// Format: [(key, x_start, y_start, x_end, y_end)]
+    /// Key is "app_name" for groups, "app_name:timestamp" for individual
     notification_clear_bounds: Vec<(String, f64, f64, f64, f64)>,
-    
-    /// Clear all button bounds (x_start, y_start, x_end, y_end)
+    /// Bounds of the "Clear All" button
     clear_all_bounds: Option<(f64, f64, f64, f64)>,
+    /// Bounds of media playback control buttons
+    /// Format: [(button_name, x_start, y_start, x_end, y_end)]
+    media_button_bounds: Vec<(String, f64, f64, f64, f64)>,
     
-    /// Collapsed notification groups (app names)
+    // === Notification UI State ===
+    
+    /// Set of app names whose notification groups are collapsed
     collapsed_groups: std::collections::HashSet<String>,
-    
-    /// Grouped notifications cache to avoid recomputing on every draw
+    /// Cached grouped notifications to avoid recomputing each frame
     grouped_notifications: Vec<(String, Vec<widget::notifications::Notification>)>,
+    /// Version counter to detect notification changes
     notifications_version: u64,
     
-    /// Force redraw flag (set when notifications are cleared)
+    // === Control Flags ===
+    
+    /// Set to true when UI changes require immediate redraw
     force_redraw: bool,
-    
-    /// Last click timestamp to debounce rapid clicks
+    /// Last click timestamp for debouncing rapid clicks
     last_click_time: std::time::Instant,
-    
-    /// Exit flag
+    /// Set to true when compositor requests close
     exit: bool,
 }
 
+// ============================================================================
+// Wayland Handler Implementations
+// ============================================================================
+// These traits are required by smithay-client-toolkit to receive events from
+// the Wayland compositor. Each handler processes specific event types.
+
+/// Handles compositor events like scale factor changes and frame callbacks.
 impl CompositorHandler for MonitorWidget {
+    /// Called when the output scale factor changes (e.g., HiDPI).
+    /// Currently ignored - could be used for HiDPI rendering support.
     fn scale_factor_changed(
         &mut self,
         _conn: &Connection,
@@ -122,6 +241,8 @@ impl CompositorHandler for MonitorWidget {
         // Handle scale factor changes if needed
     }
 
+    /// Called when display transform changes (rotation).
+    /// Currently ignored - could rotate the widget to match.
     fn transform_changed(
         &mut self,
         _conn: &Connection,
@@ -132,6 +253,8 @@ impl CompositorHandler for MonitorWidget {
         // Handle transform changes if needed
     }
 
+    /// Frame callback - compositor is ready for next frame.
+    /// This triggers a redraw with the current timestamp.
     fn frame(
         &mut self,
         _conn: &Connection,
@@ -142,6 +265,7 @@ impl CompositorHandler for MonitorWidget {
         self.draw(qh, chrono::Local::now(), true);
     }
 
+    /// Called when surface enters an output (becomes visible).
     fn surface_enter(
         &mut self,
         _conn: &Connection,
@@ -151,6 +275,7 @@ impl CompositorHandler for MonitorWidget {
     ) {
     }
 
+    /// Called when surface leaves an output (no longer visible).
     fn surface_leave(
         &mut self,
         _conn: &Connection,
@@ -161,6 +286,8 @@ impl CompositorHandler for MonitorWidget {
     }
 }
 
+/// Handles output (display) events.
+/// Currently unused but required by the registry.
 impl OutputHandler for MonitorWidget {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
@@ -191,7 +318,11 @@ impl OutputHandler for MonitorWidget {
     }
 }
 
+/// Handles layer-shell specific events.
+/// Layer-shell allows creating surfaces outside normal window management.
 impl LayerShellHandler for MonitorWidget {
+    /// Called when compositor closes our layer surface.
+    /// Sets exit flag to terminate the main loop cleanly.
     fn closed(
         &mut self,
         _conn: &Connection,
@@ -201,6 +332,8 @@ impl LayerShellHandler for MonitorWidget {
         self.exit = true;
     }
 
+    /// Called when compositor configures our layer surface.
+    /// This happens after initial creation and when size changes are acknowledged.
     fn configure(
         &mut self,
         _conn: &Connection,
@@ -216,12 +349,16 @@ impl LayerShellHandler for MonitorWidget {
     }
 }
 
+/// Handles input seat events (keyboard/mouse capability changes).
 impl SeatHandler for MonitorWidget {
     fn seat_state(&mut self) -> &mut SeatState {
         &mut self.seat_state
     }
 
     fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wayland_client::protocol::wl_seat::WlSeat) {}
+    
+    /// Called when a seat gains a new capability (pointer, keyboard, touch).
+    /// We request pointer events when pointer capability is available.
     fn new_capability(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, seat: wayland_client::protocol::wl_seat::WlSeat, capability: Capability) {
         if capability == Capability::Pointer {
             // Request pointer events
@@ -232,7 +369,11 @@ impl SeatHandler for MonitorWidget {
     fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wayland_client::protocol::wl_seat::WlSeat) {}
 }
 
+/// Handles mouse pointer events.
+/// This is where all click interactions are processed.
 impl PointerHandler for MonitorWidget {
+    /// Process batched pointer events.
+    /// Events include clicks (Press/Release) and motion.
     fn pointer_frame(
         &mut self,
         _conn: &Connection,
@@ -242,9 +383,11 @@ impl PointerHandler for MonitorWidget {
     ) {
         for event in events {
             match event.kind {
-                // Left-click (button 0x110) to toggle notification groups or clear
+                // === Left-click handling (when NOT in drag mode) ===
+                // Handles clicks on: Clear All, individual notification X buttons,
+                // group collapse/expand, and media playback controls.
                 PointerEventKind::Press { button, .. } if button == 0x110 && !self.config.widget_movable => {
-                    // Debounce clicks - ignore if less than 200ms since last click
+                    // Debounce: ignore clicks within 200ms of each other
                     let now = Instant::now();
                     if now.duration_since(self.last_click_time).as_millis() < 200 {
                         log::debug!("Ignoring rapid click (debounced)");
@@ -259,7 +402,7 @@ impl PointerHandler for MonitorWidget {
                     
                     let mut handled = false;
                     
-                    // Check if clicking "Clear All" button
+                    // Priority 1: Check "Clear All" button (top of notification section)
                     if let Some((x_start, y_start, x_end, y_end)) = self.clear_all_bounds {
                         if click_x >= x_start && click_x <= x_end && click_y >= y_start && click_y <= y_end {
                             log::info!("Clear All button clicked at ({}, {})", click_x, click_y);
@@ -270,7 +413,8 @@ impl PointerHandler for MonitorWidget {
                         }
                     }
                     
-                    // Check if clicking a group's clear button or individual notification dismiss
+                    // Priority 2: Check notification X buttons (group clear or individual dismiss)
+                    // Key format: "app_name" for groups, "app_name:timestamp" for individual
                     if !handled {
                         for (key, x_start, y_start, x_end, y_end) in &self.notification_clear_bounds {
                             log::trace!("Checking X button for {}: ({}-{}, {}-{})", key, x_start, x_end, y_start, y_end);
@@ -299,7 +443,8 @@ impl PointerHandler for MonitorWidget {
                         }
                     }
                     
-                    // Check if clicking a notification group header (to toggle)
+                    // Priority 3: Check notification group headers for collapse/expand toggle
+                    // Clicking a group header (excluding X button area) toggles visibility
                     if !handled {
                         for (app_name, y_start, y_end) in &self.notification_group_bounds {
                             log::trace!("Checking group header for {}: {}-{}", app_name, y_start, y_end);
@@ -323,13 +468,38 @@ impl PointerHandler for MonitorWidget {
                         }
                     }
                     
+                    // Priority 4: Check media control buttons (previous, play/pause, next)
+                    if !handled {
+                        for (button_name, x_start, y_start, x_end, y_end) in &self.media_button_bounds {
+                            if click_x >= *x_start && click_x <= *x_end && click_y >= *y_start && click_y <= *y_end {
+                                log::info!("Media button '{}' clicked at ({}, {})", button_name, click_x, click_y);
+                                match button_name.as_str() {
+                                    "play_pause" => {
+                                        self.media.play_pause();
+                                    }
+                                    "next" => {
+                                        self.media.next();
+                                    }
+                                    "previous" => {
+                                        self.media.previous();
+                                    }
+                                    _ => {}
+                                }
+                                self.force_redraw = true;
+                                handled = true;
+                                break;
+                            }
+                        }
+                    }
+                    
                     if handled {
                         log::debug!("Notification action handled, forcing redraw");
                     } else {
                         log::debug!("Click at ({:.1}, {:.1}) not handled by any notification element", click_x, click_y);
                     }
                 }
-                // Right-click (button 0x111) to clear notifications
+                
+                // === Right-click: Quick clear notifications in section ===
                 PointerEventKind::Press { button, .. } if button == 0x111 => {
                     if let Some((y_start, y_end)) = self.notification_bounds {
                         let click_y = event.position.1;
@@ -342,15 +512,23 @@ impl PointerHandler for MonitorWidget {
                         }
                     }
                 }
-                // Widget movement (only if enabled)
+                
+                // === Widget Dragging (only when movable mode is enabled) ===
+                // This is activated when the settings window is open
+                
+                // Start drag on left-click
                 PointerEventKind::Press { button, .. } if button == 0x110 && self.config.widget_movable => {
                     self.dragging = true;
                     self.drag_start_x = event.position.0;
                     self.drag_start_y = event.position.1;
                 }
+                
+                // End drag on release
                 PointerEventKind::Release { button, .. } if button == 0x110 && self.config.widget_movable => {
                     self.dragging = false;
                 }
+                
+                // Update position while dragging (saves to config for persistence)
                 PointerEventKind::Motion { .. } if self.dragging && self.config.widget_movable => {
                     let delta_x = (event.position.0 - self.drag_start_x) as i32;
                     let delta_y = (event.position.1 - self.drag_start_y) as i32;
@@ -377,13 +555,25 @@ impl PointerHandler for MonitorWidget {
     }
 }
 
+/// Handles shared memory buffer allocation for Wayland rendering.
 impl ShmHandler for MonitorWidget {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm_state
     }
 }
 
+// ============================================================================
+// MonitorWidget Implementation
+// ============================================================================
+
 impl MonitorWidget {
+    /// Create a new MonitorWidget with all necessary Wayland state.
+    ///
+    /// # Arguments
+    /// * `globals` - Wayland global registry
+    /// * `qh` - Queue handle for event dispatching
+    /// * `config` - Initial configuration
+    /// * `config_handler` - Handle for saving config changes
     fn new(
         globals: &wayland_client::globals::GlobalList,
         qh: &QueueHandle<Self>,
@@ -437,6 +627,7 @@ impl MonitorWidget {
             notification_group_bounds: Vec::new(),
             notification_clear_bounds: Vec::new(),
             clear_all_bounds: None,
+            media_button_bounds: Vec::new(),
             collapsed_groups: std::collections::HashSet::new(),
             grouped_notifications: Vec::new(),
             notifications_version: 0,
@@ -446,6 +637,13 @@ impl MonitorWidget {
         }
     }
 
+    /// Create the layer surface for desktop overlay rendering.
+    ///
+    /// Configures the surface to:
+    /// - Anchor to top-left corner with offset from config
+    /// - Use Layer::Top for visibility above normal windows
+    /// - Not reserve exclusive space
+    /// - Accept keyboard input on demand (for future features)
     fn create_layer_surface(&mut self, qh: &QueueHandle<Self>) {
         let surface = self.compositor_state.create_surface(qh);
         
@@ -473,6 +671,10 @@ impl MonitorWidget {
         self.layer_surface = Some(layer_surface);
     }
 
+    /// Update system statistics from all enabled monitoring modules.
+    ///
+    /// Respects the configured update interval to avoid excessive polling.
+    /// Only updates modules that are currently enabled in the config.
     fn update_system_stats(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update).as_secs_f64();
@@ -528,6 +730,10 @@ impl MonitorWidget {
         log::trace!("System stats update complete");
     }
     
+    /// Update the cached notification groups.
+    ///
+    /// Groups notifications by app name and sorts by most recent.
+    /// Only recomputes if the notification count has changed.
     fn update_notification_groups(&mut self) {
         let notifications = self.notifications.get_notifications();
         let new_version = notifications.len() as u64;
@@ -558,6 +764,19 @@ impl MonitorWidget {
         }
     }
 
+    /// Render the widget to the Wayland surface.
+    ///
+    /// This is the main rendering function that:
+    /// 1. Calculates dynamic height based on enabled sections
+    /// 2. Allocates/resizes the shared memory buffer
+    /// 3. Calls the Cairo renderer to draw all sections
+    /// 4. Updates click bounds for interactive elements
+    /// 5. Commits the buffer to the compositor
+    ///
+    /// # Arguments
+    /// * `qh` - Queue handle (unused but required by trait)
+    /// * `current_time` - Time to display on clock
+    /// * `update_stats` - Whether to poll system statistics
     fn draw(&mut self, _qh: &QueueHandle<Self>, current_time: chrono::DateTime<chrono::Local>, update_stats: bool) {
         let layer_surface = match &self.layer_surface {
             Some(ls) => ls.clone(),
@@ -698,12 +917,13 @@ impl MonitorWidget {
         log::info!("Cairo render took: {:?}", render_start.elapsed());
         
         match render_result {
-            Ok((bounds, groups, clear_bounds, clear_all)) => {
+            Ok((bounds, groups, clear_bounds, clear_all, media_bounds)) => {
                 let group_count = groups.len();
                 self.notification_bounds = bounds;
                 self.notification_group_bounds = groups;
                 self.notification_clear_bounds = clear_bounds;
                 self.clear_all_bounds = clear_all;
+                self.media_button_bounds = media_bounds;
                 log::trace!("Render successful, {} notification groups", group_count);
             }
             Err(e) => {
@@ -712,6 +932,7 @@ impl MonitorWidget {
                 self.notification_group_bounds.clear();
                 self.notification_clear_bounds.clear();
                 self.clear_all_bounds = None;
+                self.media_button_bounds.clear();
                 return; // Skip this frame
             }
         }
@@ -727,8 +948,15 @@ impl MonitorWidget {
     }
 }
 
+// Empty impl block - keeping for potential future private helpers
 impl MonitorWidget {
 }
+
+// ============================================================================
+// smithay-client-toolkit Delegation Macros
+// ============================================================================
+// These macros generate the boilerplate code to route Wayland events
+// to our handler implementations above.
 
 delegate_compositor!(MonitorWidget);
 delegate_output!(MonitorWidget);
@@ -739,6 +967,7 @@ delegate_layer!(MonitorWidget);
 
 delegate_registry!(MonitorWidget);
 
+/// Provides access to the registry state for other handlers.
 impl ProvidesRegistryState for MonitorWidget {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
@@ -746,32 +975,30 @@ impl ProvidesRegistryState for MonitorWidget {
     registry_handlers![OutputState, SeatState];
 }
 
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+
+/// Widget main function with Wayland reconnection support.
+///
+/// The main loop:
+/// 1. Connects to Wayland compositor
+/// 2. Creates the layer surface
+/// 3. Enters event loop (dispatch, draw, flush)
+/// 4. On connection error, attempts reconnection with backoff
+///
+/// # Error Handling
+///
+/// Non-recoverable errors (e.g., layer-shell not available) cause immediate exit.
+/// Recoverable errors (broken pipe) trigger reconnection.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Ignore SIGPIPE so a closed socket becomes a normal EPIPE result, not a signal
-    // This prevents the process from being killed when the compositor closes the connection
+    // Ignore SIGPIPE so a closed socket becomes a normal EPIPE result, not a signal.
+    // This prevents the process from being killed when the compositor closes the connection.
     unsafe { 
         libc::signal(libc::SIGPIPE, libc::SIG_IGN); 
     }
     
-    // Initialize logger to write to /tmp/cosmic-monitor.log (shared with applet)
-    use std::fs::OpenOptions;
-    
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/cosmic-monitor.log")
-        .expect("Failed to open log file");
-    
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .target(env_logger::Target::Pipe(Box::new(log_file)))
-        .init();
-    
-    log::info!("Starting COSMIC Monitor Widget");
-    
-    // Load Weather Icons font
-    load_weather_font();
-    
-    // Load configuration once (will be reloaded on changes inside the loop)
+    // Load configuration to check if logging should be enabled
     let config_handler = cosmic_config::Config::new(
         "com.github.zoliviragh.CosmicMonitor",
         Config::VERSION,
@@ -779,11 +1006,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let mut base_config = Config::get_entry(&config_handler).unwrap_or_default();
     
-    log::info!("Widget starting with position: X={}, Y={}", base_config.widget_x, base_config.widget_y);
-    log::info!("Weather enabled: {}, API key set: {}", base_config.show_weather, !base_config.weather_api_key.is_empty());
-    log::info!("Notifications enabled: {}, section_order: {:?}", base_config.show_notifications, base_config.section_order);
+    // Initialize logger only if enabled in config
+    if base_config.enable_logging {
+        use std::fs::OpenOptions;
+        
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/cosmic-monitor.log")
+            .expect("Failed to open log file");
+        
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .target(env_logger::Target::Pipe(Box::new(log_file)))
+            .init();
+        
+        log::info!("Starting COSMIC Monitor Widget (logging enabled)");
+        log::info!("Widget starting with position: X={}, Y={}", base_config.widget_x, base_config.widget_y);
+        log::info!("Weather enabled: {}, API key set: {}", base_config.show_weather, !base_config.weather_api_key.is_empty());
+        log::info!("Notifications enabled: {}, section_order: {:?}", base_config.show_notifications, base_config.section_order);
+    }
+    
+    // Load custom Weather Icons font for weather display
+    load_weather_font();
 
-    // RECONNECT LOOP - cycle through backoff intervals
+    // === Reconnection Loop ===
+    // Uses exponential backoff: 1s, 2s, 5s, 10s, 20s, 30s, then cycles
     let mut backoff_secs = [1_u64, 2, 5, 10, 20, 30].into_iter().cycle();
 
     'reconnect: loop {
@@ -813,12 +1060,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut last_heartbeat = Instant::now();
 
-        // INNER LOOP - one Wayland session
+        // === Session Event Loop ===
+        // Processes events until connection is lost or exit is requested
         'session: loop {
             let now = Instant::now();
             
-            // Use roundtrip instead of dispatch_pending to force compositor to send events
-            // This is more aggressive but ensures we get input events immediately
+            // === Event Dispatch ===
+            // Use roundtrip to ensure all pending events are processed
             log::trace!("Roundtrip to get events");
             if let Err(e) = event_queue.roundtrip(&mut widget) {
                 log::error!("Error in roundtrip: {}", e);
@@ -834,16 +1082,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             log::trace!("Roundtrip complete");
             
-            // Redraw when the clock second changes (synchronized with system time)
+            // === Clock Synchronization ===
+            // Display time offset by 1 second to match typical system clock behavior
             let current_time = chrono::Local::now();
-            
-            // Subtract 1 second from the time we display to match system clock behavior
-            // System clocks typically show the "current" second only after it's mostly elapsed
             let display_time = current_time - chrono::Duration::seconds(1);
             let current_second = display_time.format("%S").to_string();
             
-            // Immediate redraw for notification interactions (independent of clock)
-            // Fast path: skip expensive system stats update for UI-only changes
+            // === Immediate UI Redraw ===
+            // Fast path for notification/media interactions (skip system stats update)
             if widget.force_redraw {
                 widget.draw(&qh, display_time, false);
                 widget.force_redraw = false;
@@ -851,7 +1097,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = conn.flush();
             }
             
-            // Check if the second has changed since last draw for regular updates
+            // === Second-Based Redraw ===
+            // Full redraw with system stats when clock second changes
             let should_redraw = if let Some(ref last_sec) = widget.last_drawn_second {
                 &current_second != last_sec
             } else {
@@ -864,7 +1111,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 widget.last_drawn_second = Some(current_second);
             }
             
-            // Check for config updates every 500ms
+            // === Config Hot-Reload ===
+            // Check for external config changes every 500ms (from settings app)
             if now.duration_since(widget.last_config_check).as_millis() > 500 {
                 widget.last_config_check = now;
                 if let Ok(new_config) = Config::get_entry(&widget.config_handler) {
@@ -892,14 +1140,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Heartbeat tracking (roundtrip already happens every loop, just log occasionally)
+            // === Heartbeat Logging ===
+            // Log every 5 seconds to confirm widget is still running
             if now.duration_since(last_heartbeat) >= Duration::from_secs(5) {
                 log::info!("Heartbeat: widget still running");
                 last_heartbeat = now;
             }
             
-            // CRITICAL: Always flush the connection to keep it alive
-            // Must call flush at least a few times per second according to Wayland best practices
+            // === Connection Flush ===
+            // Must flush frequently to keep connection alive (Wayland best practice)
             log::trace!("Flushing connection");
             if let Err(e) = conn.flush() {
                 log::error!("Error flushing connection: {}", e);
@@ -915,19 +1164,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             log::trace!("Flush complete");
             
-            // Small sleep to avoid busy-waiting while staying responsive
-            thread::sleep(Duration::from_millis(16)); // ~60 FPS responsiveness
+            // === Frame Pacing ===
+            // Small sleep to avoid busy-waiting while staying responsive (~60 FPS)
+            thread::sleep(Duration::from_millis(16));
 
+            // === Exit Check ===
             if widget.exit {
                 log::info!("Exit requested, shutting down");
                 return Ok(());
             }
         } // end 'session
 
-        // Backoff then reconnect
+        // === Reconnection Backoff ===
+        // Wait before attempting to reconnect to avoid spinning
         let d = Duration::from_secs(backoff_secs.next().unwrap());
         log::info!("Reconnecting in {:?}...", d);
         thread::sleep(d);
-        // loop continues...
+        // Loop continues to 'reconnect...
     }
 }

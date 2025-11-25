@@ -1,127 +1,198 @@
-//! Widget layout calculations
-//! 
-//! Handles dynamic height calculation based on enabled components
+// SPDX-License-Identifier: MPL-2.0
+
+//! Widget Layout Calculations
+//!
+//! This module calculates the dynamic height of the widget based on which
+//! sections are enabled and how much content each section has.
+//!
+//! # Why Dynamic Height?
+//!
+//! The widget displays variable amounts of content:
+//! - Storage section grows with each mounted disk
+//! - Battery section grows with each device (system + Solaar)
+//! - Notifications section grows up to a maximum count
+//!
+//! Rather than allocating a fixed maximum height (which would waste space),
+//! we calculate exactly how much vertical space is needed.
+//!
+//! # Calculation Approach
+//!
+//! Each section contributes a fixed header height plus per-item heights:
+//!
+//! ```text
+//! Section Height = Header (35px) + (Item Count × Item Height)
+//! ```
+//!
+//! The final height is the sum of all enabled sections plus padding.
 
 use crate::config::Config;
 
-/// Calculate the required widget height based on enabled components
+// ============================================================================
+// Height Constants (in pixels)
+// ============================================================================
+
+// These constants should ideally be shared with renderer.rs, but are
+// currently duplicated. Changes here must be mirrored in the renderer.
+
+const BASE_PADDING: u32 = 10;
+const BOTTOM_PADDING: u32 = 20;
+const SECTION_SPACING: u32 = 10;
+const HEADER_HEIGHT: u32 = 35;
+const MINIMUM_HEIGHT: u32 = 100;
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+/// Calculate widget height (legacy API, assumes no batteries).
+///
+/// Use [`calculate_widget_height_with_all`] for full control.
 pub fn calculate_widget_height(config: &Config, disk_count: usize) -> u32 {
     calculate_widget_height_with_batteries(config, disk_count, 0)
 }
 
-/// Calculate the required widget height with battery device count
+/// Calculate widget height with battery count (legacy API).
+///
+/// Use [`calculate_widget_height_with_all`] for full control.
 pub fn calculate_widget_height_with_batteries(config: &Config, disk_count: usize, battery_count: usize) -> u32 {
     calculate_widget_height_with_all(config, disk_count, battery_count, 0)
 }
 
-/// Calculate the required widget height with all component counts
+/// Calculate the required widget height based on enabled sections and content counts.
+///
+/// This is the primary height calculation function used by the widget's draw loop.
+///
+/// # Arguments
+///
+/// * `config` - Current configuration with enabled/disabled sections
+/// * `disk_count` - Number of mounted disks to display
+/// * `battery_count` - Number of battery devices (system + Solaar)
+/// * `notification_count` - Number of notifications (capped at max_notifications)
+///
+/// # Returns
+///
+/// Height in pixels, minimum 100px
 pub fn calculate_widget_height_with_all(config: &Config, disk_count: usize, battery_count: usize, notification_count: usize) -> u32 {
-    let mut required_height = 10; // Base padding
+    let mut required_height = BASE_PADDING;
     
-    // Clock and date
+    // === Clock & Date Section ===
+    // Always at the top of the widget
     if config.show_clock {
-        required_height += 70; // Clock height
+        required_height += 70; // Large clock text
     }
     if config.show_date {
-        required_height += 35; // Date height
+        required_height += 35; // Date text below clock
     }
     if config.show_clock || config.show_date {
         required_height += 20; // Spacing after clock/date
     }
     
-    // Utilization section
+    // === Utilization Section ===
+    // CPU, Memory, and GPU usage bars
     if config.show_cpu || config.show_memory || config.show_gpu {
-        required_height += 35; // "Utilization" header
+        required_height += HEADER_HEIGHT; // "Utilization" header
         if config.show_cpu {
-            required_height += 30; // CPU bar
+            required_height += 30; // CPU bar + label
         }
         if config.show_memory {
-            required_height += 30; // RAM bar
+            required_height += 30; // RAM bar + label
         }
         if config.show_gpu {
-            required_height += 30; // GPU bar
+            required_height += 30; // GPU bar + label
         }
     }
     
-    // Temperature section
+    // === Temperature Section ===
+    // CPU and/or GPU temperatures
     if config.show_cpu_temp || config.show_gpu_temp {
-        required_height += 10; // Spacing before temps
-        required_height += 35; // "Temperatures" header
+        required_height += SECTION_SPACING;
+        required_height += HEADER_HEIGHT; // "Temperatures" header
         
         if config.use_circular_temp_display {
-            // Circular display: larger height for circles
-            required_height += 60; // Circular temp display height
+            // Circular gauges are larger
+            required_height += 60;
         } else {
-            // Text display
+            // Simple text display
             if config.show_cpu_temp {
-                required_height += 25; // CPU temp
+                required_height += 25;
             }
             if config.show_gpu_temp {
-                required_height += 25; // GPU temp
+                required_height += 25;
             }
         }
     }
     
-    // Network section
+    // === Network Section ===
+    // Upload/Download rates (if enabled)
     if config.show_network {
-        required_height += 50; // Two network lines
+        required_height += 50; // Two lines: RX and TX
     }
     
-    // Storage section
+    // === Storage Section ===
+    // Dynamic based on mounted disk count
     if config.show_storage && disk_count > 0 {
-        required_height += 10; // Spacing before header
-        required_height += 35; // "Storage" header
-        required_height += disk_count as u32 * 45; // Each disk: 20px name + 12px bar + 13px spacing
+        required_height += SECTION_SPACING;
+        required_height += HEADER_HEIGHT; // "Storage" header
+        // Each disk: name (20px) + bar (12px) + spacing (13px) = 45px
+        required_height += disk_count as u32 * 45;
     }
     
-    // Disk section
+    // === Disk I/O Section ===
+    // Read/Write rates (if enabled, separate from storage)
     if config.show_disk {
-        required_height += 50; // Two disk lines
+        required_height += 50;
     }
     
-    // Weather section
+    // === Weather Section ===
+    // Icon + temperature + description
     if config.show_weather {
-        required_height += 10; // Spacing before header
-        required_height += 35; // Header
+        required_height += SECTION_SPACING;
+        required_height += HEADER_HEIGHT; // "Weather" header
         required_height += 70; // Icon and text content
     }
 
-    // Battery section
+    // === Battery Section ===
+    // Dynamic based on device count
     if config.show_battery {
-        required_height += 10; // Spacing before header
-        required_height += 35; // "Battery" header
+        required_height += SECTION_SPACING;
+        required_height += HEADER_HEIGHT; // "Battery" header
         if battery_count > 0 {
-            // Each device: 28px for name + 38px for battery icon/percentage + spacing
+            // Each device: name (28px) + icon/percentage (38px) = 66px
             required_height += battery_count as u32 * 66;
         } else {
-            // Default space for "no devices" message
+            // "No devices" placeholder
             required_height += 25;
         }
     }
     
-    // Notifications section
+    // === Notifications Section ===
+    // Dynamic based on notification count (capped at 5)
     if config.show_notifications {
-        required_height += 10; // Spacing before header
-        required_height += 35; // "Notifications" header
+        required_height += SECTION_SPACING;
+        required_height += HEADER_HEIGHT; // "Notifications" header
         if notification_count > 0 {
-            // Each notification: ~63px (18px app name + 20px summary + 18px body + 5px spacing)
-            let displayed_count = notification_count.min(5); // Max 5 notifications
+            // Each notification: app (18px) + summary (20px) + body (18px) + spacing (5px) = 61px
+            // Plus some extra for grouped headers
+            let displayed_count = notification_count.min(5);
             required_height += displayed_count as u32 * 63;
         } else {
-            // "No notifications" message
+            // "No notifications" placeholder
             required_height += 25;
         }
     }
     
-    // Media player section (Cider)
+    // === Media Player Section ===
+    // Now playing from Cider
     if config.show_media {
-        required_height += 10; // Spacing before header
-        required_height += 28; // "Now Playing" header
-        required_height += 130; // Panel height (title, artist, album, progress bar, time) + extra padding
-        required_height += 30; // Bottom padding after panel
+        required_height += SECTION_SPACING;
+        required_height += 28; // "Now Playing" header (smaller)
+        required_height += 130; // Panel: title, artist, album, progress, controls
+        required_height += 30; // Bottom padding
     }
     
-    required_height += 20; // Bottom padding
+    // Final padding
+    required_height += BOTTOM_PADDING;
     
-    required_height.max(100) // Minimum 100px height
+    // Enforce minimum height
+    required_height.max(MINIMUM_HEIGHT)
 }

@@ -1,7 +1,67 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Rendering module for the widget
-//! Contains the main rendering logic and helper functions
+//! # Widget Rendering Module
+//!
+//! This is the core rendering module for the COSMIC Monitor Widget. It uses
+//! Cairo for 2D graphics and Pango for text rendering to draw all widget
+//! sections onto an ARGB32 image surface.
+//!
+//! ## Architecture
+//!
+//! The renderer operates on raw pixel buffers provided by the Wayland compositor.
+//! It creates a Cairo ImageSurface wrapping the buffer and draws using Cairo's
+//! immediate-mode API.
+//!
+//! ```text
+//! ┌─────────────────────┐
+//! │  Wayland Buffer     │  Raw ARGB32 pixel data
+//! │  (shared memory)    │
+//! └──────────┬──────────┘
+//!            │
+//! ┌──────────▼──────────┐
+//! │  Cairo ImageSurface │  Wraps buffer with unsafe lifetime extension
+//! │  (Format::ARgb32)   │
+//! └──────────┬──────────┘
+//!            │
+//! ┌──────────▼──────────┐
+//! │  Cairo Context      │  Drawing operations
+//! │  + Pango Layout     │  Text rendering
+//! └──────────┬──────────┘
+//!            │
+//!     ┌──────┴──────┬───────────┬───────────┬─────────┐
+//!     ▼             ▼           ▼           ▼         ▼
+//! DateTime    Utilization   Temperature   Storage   Weather
+//!   Section    (CPU/GPU)     (Gauges)     (Disks)   (Icons)
+//!     ▼             ▼           ▼           ▼         ▼
+//!  Battery    Notifications    Media      Network   (Legacy)
+//! ```
+//!
+//! ## Rendering Pipeline
+//!
+//! 1. Create Cairo surface from raw buffer (unsafe lifetime extension)
+//! 2. Clear background to transparent (ARGB 0,0,0,0)
+//! 3. Iterate through configured section order
+//! 4. Each section renders at current Y position, returns new Y
+//! 5. Flush surface to ensure all operations complete
+//! 6. Return click bounds for interactive elements
+//!
+//! ## Text Rendering Strategy
+//!
+//! All text is rendered with a black outline for visibility on any background:
+//! 1. Create Pango layout with text content
+//! 2. Convert layout to Cairo path (`pangocairo::functions::layout_path`)
+//! 3. Stroke path with black (outline)
+//! 4. Fill path with white or color (text body)
+//!
+//! ## Interactive Element Bounds
+//!
+//! The renderer returns bounding boxes for clickable elements:
+//! - Notification groups (expand/collapse)
+//! - Notification clear buttons (per-notification and per-group)
+//! - Clear All button
+//! - Media playback controls (prev/play/pause/next)
+//!
+//! These bounds are used by widget_main.rs to handle click events.
 
 use cairo;
 use pango;
@@ -16,51 +76,168 @@ use super::notifications::Notification;
 use super::media::MediaInfo;
 use crate::config::WidgetSection;
 
-/// Parameters for rendering the widget
+// ============================================================================
+// Render Parameters Struct
+// ============================================================================
+
+/// All parameters needed to render the widget.
+///
+/// This struct aggregates all data sources and configuration flags needed
+/// for a single render pass. It's created fresh each frame with current
+/// monitor readings and settings.
+///
+/// # Data Sources
+///
+/// - **Utilization**: CPU, memory, GPU percentages from UtilizationMonitor
+/// - **Temperature**: CPU/GPU temps from TemperatureMonitor
+/// - **Network**: RX/TX rates from NetworkMonitor
+/// - **Storage**: Disk info array from StorageMonitor
+/// - **Battery**: Device array from BatteryMonitor
+/// - **Weather**: Data from WeatherMonitor
+/// - **Notifications**: Grouped notifications from NotificationMonitor
+/// - **Media**: Playback info from MediaMonitor
+///
+/// # Configuration Flags
+///
+/// Boolean flags control which sections to render. These come from the
+/// user's settings and allow selective display of widget sections.
+///
+/// # Section Order
+///
+/// The `section_order` array determines the vertical arrangement of sections.
+/// Users can reorder sections in the settings UI.
 pub struct RenderParams<'a> {
+    /// Surface width in pixels
     pub width: i32,
+    /// Surface height in pixels
     pub height: i32,
+    
+    // Utilization data
+    /// CPU usage percentage (0.0 - 100.0)
     pub cpu_usage: f32,
+    /// Memory usage percentage (0.0 - 100.0)
     pub memory_usage: f32,
+    /// GPU usage percentage (0.0 - 100.0)
     pub gpu_usage: f32,
+    
+    // Temperature data
+    /// CPU temperature in Celsius
     pub cpu_temp: f32,
+    /// GPU temperature in Celsius
     pub gpu_temp: f32,
+    
+    // Network data
+    /// Network download rate in bytes per second
     pub network_rx_rate: f64,
+    /// Network upload rate in bytes per second
     pub network_tx_rate: f64,
+    
+    // Section visibility flags
+    /// Show CPU utilization bar
     pub show_cpu: bool,
+    /// Show memory utilization bar
     pub show_memory: bool,
+    /// Show network stats (legacy, not in section order yet)
     pub show_network: bool,
+    /// Show disk I/O stats (legacy, not in section order yet)
     pub show_disk: bool,
+    /// Show storage/disk usage section
     pub show_storage: bool,
+    /// Show GPU utilization bar
     pub show_gpu: bool,
+    /// Show CPU temperature
     pub show_cpu_temp: bool,
+    /// Show GPU temperature
     pub show_gpu_temp: bool,
+    /// Show clock (time)
     pub show_clock: bool,
+    /// Show date
     pub show_date: bool,
+    /// Show percentage text next to progress bars
     pub show_percentages: bool,
+    /// Use 24-hour time format (vs 12-hour with AM/PM)
     pub use_24hour_time: bool,
+    /// Use circular gauge display for temperatures
     pub use_circular_temp_display: bool,
+    /// Show weather section
     pub show_weather: bool,
+    /// Show battery/peripheral section
     pub show_battery: bool,
+    /// Show notifications section
     pub show_notifications: bool,
+    /// Show media player section
     pub show_media: bool,
+    /// Enable Solaar integration for Logitech devices
     pub enable_solaar_integration: bool,
+    
+    // Weather data
+    /// Current temperature from weather API
     pub weather_temp: f32,
+    /// Weather description (e.g., "Partly cloudy")
     pub weather_desc: &'a str,
+    /// Location name from weather API
     pub weather_location: &'a str,
+    /// Weather icon code (e.g., "01d", "10n")
     pub weather_icon: &'a str,
+    
+    // Complex data references
+    /// Array of disk information for storage section
     pub disk_info: &'a [DiskInfo],
+    /// Array of battery device information
     pub battery_devices: &'a [BatteryDevice],
+    /// Pre-grouped notifications (app_name, notifications)
     pub grouped_notifications: &'a [(String, Vec<Notification>)],
+    /// Set of collapsed notification group names
     pub collapsed_groups: &'a std::collections::HashSet<String>,
+    /// Current media playback information
     pub media_info: &'a MediaInfo,
+    /// Ordered list of sections to render
     pub section_order: &'a [WidgetSection],
+    /// Current local time for clock/date display
     pub current_time: chrono::DateTime<chrono::Local>,
 }
 
-/// Main rendering function for the widget
-/// Returns (notification_section_bounds, group_bounds, clear_button_bounds, clear_all_bounds)
-pub fn render_widget(canvas: &mut [u8], params: RenderParams) -> (Option<(f64, f64)>, Vec<(String, f64, f64)>, Vec<(String, f64, f64, f64, f64)>, Option<(f64, f64, f64, f64)>) {
+// ============================================================================
+// Type Aliases
+// ============================================================================
+
+/// Media button hit-test bounds: (button_name, x_start, y_start, x_end, y_end)
+///
+/// Used for detecting clicks on media playback controls.
+/// Button names: "previous", "play_pause", "next"
+pub type MediaButtonBounds = Vec<(String, f64, f64, f64, f64)>;
+
+// ============================================================================
+// Main Rendering Functions
+// ============================================================================
+
+/// Main rendering function for the complete widget.
+///
+/// Renders all enabled sections onto the provided pixel buffer and returns
+/// bounds for all interactive elements (notifications and media controls).
+///
+/// # Arguments
+///
+/// * `canvas` - Mutable ARGB32 pixel buffer (width * height * 4 bytes)
+/// * `params` - All render parameters including data and configuration
+///
+/// # Returns
+///
+/// Tuple of interactive element bounds:
+/// - `notification_section_bounds`: Y range of notification section
+/// - `group_bounds`: Vec of (app_name, y_start, y_end) for groups
+/// - `clear_button_bounds`: Vec of (id, x1, y1, x2, y2) for X buttons
+/// - `clear_all_bounds`: Optional bounds for "Clear All" button
+/// - `media_button_bounds`: Vec of media control button bounds
+///
+/// # Safety
+///
+/// Uses unsafe to extend the lifetime of the canvas buffer for Cairo.
+/// This is safe because:
+/// 1. The ImageSurface is dropped before the function returns
+/// 2. The canvas buffer outlives all Cairo operations
+/// 3. The surface is flushed before returning
+pub fn render_widget(canvas: &mut [u8], params: RenderParams) -> (Option<(f64, f64)>, Vec<(String, f64, f64)>, Vec<(String, f64, f64, f64, f64)>, Option<(f64, f64, f64, f64)>, MediaButtonBounds) {
     // Use unsafe to extend the lifetime for Cairo
     // This is safe because the surface doesn't outlive the canvas buffer
     let surface = unsafe {
@@ -82,6 +259,7 @@ pub fn render_widget(canvas: &mut [u8], params: RenderParams) -> (Option<(f64, f
     let mut notification_group_bounds: Vec<(String, f64, f64)> = Vec::new();
     let mut notification_clear_bounds: Vec<(String, f64, f64, f64, f64)> = Vec::new();
     let mut clear_all_bounds: Option<(f64, f64, f64, f64)> = None;
+    let mut media_button_bounds: MediaButtonBounds = Vec::new();
 
     {
         let cr = cairo::Context::new(&surface).expect("Failed to create cairo context");
@@ -165,7 +343,9 @@ pub fn render_widget(canvas: &mut [u8], params: RenderParams) -> (Option<(f64, f
                 WidgetSection::Media => {
                     if params.show_media {
                         y_pos += 10.0; // Spacing before media section
-                        y_pos = render_media(&cr, &layout, y_pos, params.media_info);
+                        let (new_y, buttons) = render_media(&cr, &layout, y_pos, params.media_info);
+                        y_pos = new_y;
+                        media_button_bounds = buttons;
                     }
                 }
             }
@@ -184,10 +364,24 @@ pub fn render_widget(canvas: &mut [u8], params: RenderParams) -> (Option<(f64, f
     // Ensure Cairo surface is flushed
     surface.flush();
     
-    (notification_bounds, notification_group_bounds, notification_clear_bounds, clear_all_bounds)
+    (notification_bounds, notification_group_bounds, notification_clear_bounds, clear_all_bounds, media_button_bounds)
 }
 
-/// Render main widget WITHOUT notifications (for split surface architecture)
+// ============================================================================
+// Alternative Rendering Functions (Unused but kept for split-surface architecture)
+// ============================================================================
+
+/// Render main widget WITHOUT notifications (for split surface architecture).
+///
+/// This function was designed for a split-surface approach where notifications
+/// would be rendered on a separate surface. Currently unused but kept for
+/// potential future use.
+///
+/// # Note
+///
+/// This is marked as dead code by the compiler. The current implementation
+/// uses a single surface for all rendering.
+#[allow(dead_code)]
 pub fn render_main_widget(canvas: &mut [u8], params: RenderParams) -> (Vec<(String, f64, f64)>, Vec<(String, f64, f64, f64, f64)>, Option<(f64, f64, f64, f64)>) {
     // Use unsafe to extend the lifetime for Cairo
     let surface = unsafe {
@@ -280,7 +474,8 @@ pub fn render_main_widget(canvas: &mut [u8], params: RenderParams) -> (Vec<(Stri
                 WidgetSection::Media => {
                     if params.show_media {
                         y_pos += 10.0;
-                        y_pos = render_media(&cr, &layout, y_pos, params.media_info);
+                        let (new_y, _buttons) = render_media(&cr, &layout, y_pos, params.media_info);
+                        y_pos = new_y;
                     }
                 }
             }
@@ -291,8 +486,17 @@ pub fn render_main_widget(canvas: &mut [u8], params: RenderParams) -> (Vec<(Stri
     notification_bounds
 }
 
-/// Render ONLY notifications on separate surface (for split surface architecture)
-/// Returns (notification_group_bounds, clear_button_bounds, clear_all_bounds)
+/// Render ONLY notifications on separate surface (for split surface architecture).
+///
+/// This function was designed for a split-surface approach where notifications
+/// would be rendered independently. Currently unused but kept for potential
+/// future use.
+///
+/// # Note
+///
+/// This is marked as dead code by the compiler. The current implementation
+/// uses a single surface for all rendering.
+#[allow(dead_code)]
 pub fn render_notification_surface(
     canvas: &mut [u8], 
     width: i32,
@@ -351,7 +555,31 @@ pub fn render_notification_surface(
     (notification_group_bounds, notification_clear_bounds, clear_all_bounds)
 }
 
-/// Render date/time section
+// ============================================================================
+// DateTime Section
+// ============================================================================
+
+/// Render date and time display at the top of the widget.
+///
+/// The clock is rendered with a large font (48pt) for hours and minutes,
+/// with seconds in a smaller font (28pt) to the right. For 12-hour format,
+/// AM/PM is appended after seconds.
+///
+/// # Clock Format Examples
+///
+/// - 24-hour: `14:30:45`
+/// - 12-hour: `2:30:45 PM`
+///
+/// # Date Format
+///
+/// Full weekday, day, month, year: `Wednesday, 15 January 2025`
+///
+/// # Visual Layout
+///
+/// ```text
+/// 14:30 :45      ← Clock (large + small seconds)
+/// Wednesday, 15 January 2025  ← Date
+/// ```
 fn render_datetime(
     cr: &cairo::Context,
     layout: &pango::Layout,
@@ -443,7 +671,28 @@ fn render_datetime(
     y_pos
 }
 
-/// Render utilization section (CPU, RAM, GPU)
+// ============================================================================
+// Section Rendering Functions
+// ============================================================================
+// Each function renders a specific section of the widget and returns the
+// Y position after rendering (for vertical stacking).
+
+/// Render CPU, RAM, and GPU utilization bars.
+///
+/// Displays each enabled resource with:
+/// - Icon (CPU chip, RAM stick, GPU card)
+/// - Label text
+/// - Progress bar with color-coded fill (green/yellow/red)
+/// - Optional percentage text
+///
+/// # Layout
+///
+/// ```text
+/// Utilization
+/// [CPU icon] CPU: [████████░░░░] 75.2%
+/// [RAM icon] RAM: [██████░░░░░░] 52.1%
+/// [GPU icon] GPU: [██░░░░░░░░░░] 23.5%
+/// ```
 fn render_utilization(
     cr: &cairo::Context,
     layout: &pango::Layout,
@@ -557,7 +806,21 @@ fn render_utilization(
     y
 }
 
-/// Render temperature section
+/// Render temperature section (CPU and GPU temps).
+///
+/// Supports two display modes controlled by `use_circular_temp_display`:
+/// - **Circular**: Animated gauge rings with color-coded fill
+/// - **Text**: Simple text display "CPU: 45.2°C"
+///
+/// # Layout (Circular Mode)
+///
+/// ```text
+/// Temperatures
+///  ╭───╮  ╭───╮
+/// │ 45°│ │ 52°│
+///  ╰───╯  ╰───╯
+///   CPU    GPU
+/// ```
 fn render_temperatures(
     cr: &cairo::Context,
     layout: &pango::Layout,
@@ -578,6 +841,7 @@ fn render_temperatures(
     cr.fill().expect("Failed to fill");
     y += 35.0;
     
+    // Delegate to circular or text renderer based on settings
     if params.use_circular_temp_display {
         y = render_circular_temps(cr, layout, y, params);
     } else {
@@ -587,7 +851,13 @@ fn render_temperatures(
     y
 }
 
-/// Render circular temperature gauges
+/// Render circular temperature gauges side by side.
+///
+/// Draws hollow ring gauges that fill based on temperature. The ring
+/// color changes based on temperature percentage of max (100°C):
+/// - Green: < 50%
+/// - Yellow: 50-80%
+/// - Red: > 80%
 fn render_circular_temps(
     cr: &cairo::Context,
     layout: &pango::Layout,
@@ -1060,14 +1330,14 @@ fn render_weather(
     cr.stroke_preserve().expect("Failed to stroke");
     cr.set_source_rgb(1.0, 1.0, 1.0);
     cr.fill().expect("Failed to fill");
-    y += 35.0;
+    y += 40.0;  // More space after header to prevent icon overlap
     
-    // Draw weather icon
+    // Draw weather icon (offset from left edge to prevent clipping)
     let icon_size = 40.0;
-    draw_weather_icon(cr, 10.0, y, icon_size, params.weather_icon);
+    draw_weather_icon(cr, 20.0, y, icon_size, params.weather_icon);
     
     // Weather info to the right of icon
-    let info_x = 70.0;
+    let info_x = 80.0;
     let font_desc = pango::FontDescription::from_string("Ubuntu 14");
     layout.set_font_description(Some(&font_desc));
     
@@ -1433,15 +1703,17 @@ fn render_notifications(
 }
 
 /// Render media player section
+/// Returns (y_position, button_bounds) where button_bounds is Vec<(button_name, x_start, y_start, x_end, y_end)>
 fn render_media(
     cr: &cairo::Context,
     layout: &pango::Layout,
     y_start: f64,
     media_info: &MediaInfo,
-) -> f64 {
+) -> (f64, MediaButtonBounds) {
     use super::media::PlaybackStatus;
     
     let mut y_pos = y_start;
+    let mut button_bounds: MediaButtonBounds = Vec::new();
     
     // Draw section header
     let font_desc = pango::FontDescription::from_string("Ubuntu Bold 14");
@@ -1470,11 +1742,11 @@ fn render_media(
         cr.set_source_rgb(0.6, 0.6, 0.6);
         cr.fill().expect("Failed to fill");
         
-        return y_pos + 25.0;
+        return (y_pos + 25.0, button_bounds);
     }
     
     // Draw background panel
-    let panel_height = 105.0;
+    let panel_height = 125.0;
     let panel_y = y_pos;
     cr.set_source_rgba(0.1, 0.1, 0.15, 0.7);
     cr.rectangle(10.0, panel_y, 360.0, panel_height);
@@ -1488,44 +1760,13 @@ fn render_media(
     // Content starts inside the panel with padding
     y_pos += 10.0;
     
-    // Draw playback status icon (play/pause)
-    let icon_x = 25.0;
-    let icon_y = y_pos + 5.0;
-    let icon_size = 20.0;
-    
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.set_line_width(2.0);
-    
-    match media_info.status {
-        PlaybackStatus::Playing => {
-            // Draw pause icon (two vertical bars)
-            cr.rectangle(icon_x, icon_y, 6.0, icon_size);
-            cr.fill().expect("Failed to fill");
-            cr.rectangle(icon_x + 10.0, icon_y, 6.0, icon_size);
-            cr.fill().expect("Failed to fill");
-        }
-        PlaybackStatus::Paused => {
-            // Draw play icon (triangle)
-            cr.move_to(icon_x, icon_y);
-            cr.line_to(icon_x, icon_y + icon_size);
-            cr.line_to(icon_x + icon_size, icon_y + icon_size / 2.0);
-            cr.close_path();
-            cr.fill().expect("Failed to fill");
-        }
-        PlaybackStatus::Stopped => {
-            // Draw stop icon (square)
-            cr.rectangle(icon_x, icon_y, icon_size, icon_size);
-            cr.fill().expect("Failed to fill");
-        }
-    }
-    
-    // Draw track title
-    let text_x = 55.0;
+    // Draw track title (moved up, no play/pause icon here anymore)
+    let text_x = 20.0;
     let font_desc_bold = pango::FontDescription::from_string("Ubuntu Bold 12");
     layout.set_font_description(Some(&font_desc_bold));
     
-    let title = if media_info.title.len() > 35 {
-        format!("{}...", &media_info.title[..32])
+    let title = if media_info.title.len() > 40 {
+        format!("{}...", &media_info.title[..37])
     } else {
         media_info.title.clone()
     };
@@ -1545,8 +1786,8 @@ fn render_media(
         let font_desc = pango::FontDescription::from_string("Ubuntu 11");
         layout.set_font_description(Some(&font_desc));
         
-        let artist = if media_info.artist.len() > 40 {
-            format!("{}...", &media_info.artist[..37])
+        let artist = if media_info.artist.len() > 45 {
+            format!("{}...", &media_info.artist[..42])
         } else {
             media_info.artist.clone()
         };
@@ -1567,8 +1808,8 @@ fn render_media(
         let font_desc_small = pango::FontDescription::from_string("Ubuntu Italic 10");
         layout.set_font_description(Some(&font_desc_small));
         
-        let album = if media_info.album.len() > 45 {
-            format!("{}...", &media_info.album[..42])
+        let album = if media_info.album.len() > 50 {
+            format!("{}...", &media_info.album[..47])
         } else {
             media_info.album.clone()
         };
@@ -1582,10 +1823,10 @@ fn render_media(
         cr.fill().expect("Failed to fill");
     }
     
-    // Draw progress bar
-    y_pos += 22.0;
-    let bar_x = 15.0;
-    let bar_width = 310.0;
+    // Draw progress bar (full width)
+    y_pos += 18.0;
+    let bar_x = 20.0;
+    let bar_width = 330.0;
     let bar_height = 6.0;
     
     // Background bar
@@ -1607,8 +1848,8 @@ fn render_media(
     cr.rectangle(bar_x, y_pos, bar_width, bar_height);
     cr.stroke().expect("Failed to stroke progress border");
     
-    // Draw time
-    y_pos += 12.0;
+    // Draw time on left and player name on right (below progress bar)
+    y_pos += 10.0;
     let font_desc_time = pango::FontDescription::from_string("Ubuntu 9");
     layout.set_font_description(Some(&font_desc_time));
     
@@ -1632,6 +1873,100 @@ fn render_media(
     cr.set_source_rgb(0.5, 0.5, 0.5);
     cr.fill().expect("Failed to fill");
     
+    // Draw playback controls (Previous, Play/Pause, Next) - centered below progress
+    y_pos += 16.0;
+    let button_size = 24.0;
+    let button_spacing = 20.0;
+    let total_controls_width = button_size * 3.0 + button_spacing * 2.0;
+    let controls_start_x = (370.0 - total_controls_width) / 2.0;
+    
+    // Previous button (<<)
+    let prev_x = controls_start_x;
+    let prev_y = y_pos;
+    
+    // Draw previous button background (hover effect area)
+    cr.set_source_rgba(0.3, 0.3, 0.4, 0.5);
+    cr.arc(prev_x + button_size / 2.0, prev_y + button_size / 2.0, button_size / 2.0 + 2.0, 0.0, 2.0 * std::f64::consts::PI);
+    cr.fill().expect("Failed to fill");
+    
+    // Draw previous icon (two triangles pointing left)
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    let tri_size = 8.0;
+    // First triangle
+    cr.move_to(prev_x + button_size / 2.0 - 2.0, prev_y + button_size / 2.0);
+    cr.line_to(prev_x + button_size / 2.0 + tri_size - 2.0, prev_y + button_size / 2.0 - tri_size);
+    cr.line_to(prev_x + button_size / 2.0 + tri_size - 2.0, prev_y + button_size / 2.0 + tri_size);
+    cr.close_path();
+    cr.fill().expect("Failed to fill");
+    // Second triangle
+    cr.move_to(prev_x + button_size / 2.0 - tri_size - 2.0, prev_y + button_size / 2.0);
+    cr.line_to(prev_x + button_size / 2.0 - 2.0, prev_y + button_size / 2.0 - tri_size);
+    cr.line_to(prev_x + button_size / 2.0 - 2.0, prev_y + button_size / 2.0 + tri_size);
+    cr.close_path();
+    cr.fill().expect("Failed to fill");
+    
+    button_bounds.push(("previous".to_string(), prev_x - 2.0, prev_y - 2.0, prev_x + button_size + 2.0, prev_y + button_size + 2.0));
+    
+    // Play/Pause button
+    let play_x = prev_x + button_size + button_spacing;
+    let play_y = y_pos;
+    
+    // Draw play/pause button background (larger, highlighted)
+    cr.set_source_rgba(0.4, 0.6, 1.0, 0.6);
+    cr.arc(play_x + button_size / 2.0, play_y + button_size / 2.0, button_size / 2.0 + 4.0, 0.0, 2.0 * std::f64::consts::PI);
+    cr.fill().expect("Failed to fill");
+    
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    match media_info.status {
+        PlaybackStatus::Playing => {
+            // Draw pause icon (two vertical bars)
+            let bar_width = 4.0;
+            let bar_height = 14.0;
+            let bar_y = play_y + (button_size - bar_height) / 2.0;
+            cr.rectangle(play_x + button_size / 2.0 - bar_width - 2.0, bar_y, bar_width, bar_height);
+            cr.fill().expect("Failed to fill");
+            cr.rectangle(play_x + button_size / 2.0 + 2.0, bar_y, bar_width, bar_height);
+            cr.fill().expect("Failed to fill");
+        }
+        PlaybackStatus::Paused | PlaybackStatus::Stopped => {
+            // Draw play icon (triangle)
+            let tri_size = 10.0;
+            cr.move_to(play_x + button_size / 2.0 - tri_size / 2.0, play_y + button_size / 2.0 - tri_size);
+            cr.line_to(play_x + button_size / 2.0 - tri_size / 2.0, play_y + button_size / 2.0 + tri_size);
+            cr.line_to(play_x + button_size / 2.0 + tri_size, play_y + button_size / 2.0);
+            cr.close_path();
+            cr.fill().expect("Failed to fill");
+        }
+    }
+    
+    button_bounds.push(("play_pause".to_string(), play_x - 4.0, play_y - 4.0, play_x + button_size + 4.0, play_y + button_size + 4.0));
+    
+    // Next button (>>)
+    let next_x = play_x + button_size + button_spacing;
+    let next_y = y_pos;
+    
+    // Draw next button background
+    cr.set_source_rgba(0.3, 0.3, 0.4, 0.5);
+    cr.arc(next_x + button_size / 2.0, next_y + button_size / 2.0, button_size / 2.0 + 2.0, 0.0, 2.0 * std::f64::consts::PI);
+    cr.fill().expect("Failed to fill");
+    
+    // Draw next icon (two triangles pointing right)
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    // First triangle
+    cr.move_to(next_x + button_size / 2.0 + 2.0, next_y + button_size / 2.0);
+    cr.line_to(next_x + button_size / 2.0 - tri_size + 2.0, next_y + button_size / 2.0 - tri_size);
+    cr.line_to(next_x + button_size / 2.0 - tri_size + 2.0, next_y + button_size / 2.0 + tri_size);
+    cr.close_path();
+    cr.fill().expect("Failed to fill");
+    // Second triangle
+    cr.move_to(next_x + button_size / 2.0 + tri_size + 2.0, next_y + button_size / 2.0);
+    cr.line_to(next_x + button_size / 2.0 + 2.0, next_y + button_size / 2.0 - tri_size);
+    cr.line_to(next_x + button_size / 2.0 + 2.0, next_y + button_size / 2.0 + tri_size);
+    cr.close_path();
+    cr.fill().expect("Failed to fill");
+    
+    button_bounds.push(("next".to_string(), next_x - 2.0, next_y - 2.0, next_x + button_size + 2.0, next_y + button_size + 2.0));
+    
     // Return position after the panel with some padding
-    panel_y + panel_height + 15.0
+    (panel_y + panel_height + 15.0, button_bounds)
 }

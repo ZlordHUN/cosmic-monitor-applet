@@ -1,43 +1,115 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Utilization monitoring (CPU, Memory, GPU)
+//! CPU, Memory, and GPU Utilization Monitoring
+//!
+//! This module provides real-time system resource utilization monitoring for:
+//! - **CPU**: Overall CPU usage percentage via sysinfo
+//! - **Memory**: Used/total RAM with percentage
+//! - **GPU**: Utilization for NVIDIA, AMD, and Intel GPUs
+//!
+//! # GPU Monitoring
+//!
+//! GPU utilization is monitored in a background thread to avoid blocking the UI.
+//! The detection order is:
+//!
+//! 1. **NVIDIA**: Uses `nvidia-smi` command if available
+//! 2. **AMD**: Reads from `/sys/class/drm/card*/device/gpu_busy_percent` (preferred)
+//!    or falls back to `radeontop`
+//! 3. **Intel**: Calculates from current/max frequency ratio in sysfs,
+//!    or falls back to `intel_gpu_top`
+//!
+//! # Usage
+//!
+//! ```rust
+//! let mut monitor = UtilizationMonitor::new();
+//! 
+//! // Call periodically (e.g., every second)
+//! monitor.update();
+//! 
+//! println!("CPU: {:.1}%", monitor.cpu_usage);
+//! println!("RAM: {:.1}%", monitor.memory_usage);
+//! println!("GPU: {:.1}%", monitor.get_gpu_usage());
+//! ```
+//!
+//! # Thread Safety
+//!
+//! GPU usage is stored in an `Arc<Mutex<f32>>` and updated by a background thread.
+//! The `get_gpu_usage()` method safely reads the current value.
 
 use sysinfo::System;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+// ============================================================================
+// GPU Vendor Detection
+// ============================================================================
+
+/// Supported GPU vendors for utilization monitoring.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum GpuVendor {
+    /// NVIDIA GPU (uses nvidia-smi)
     Nvidia,
+    /// AMD GPU (uses sysfs or radeontop)
     Amd,
+    /// Intel integrated/discrete GPU (uses sysfs or intel_gpu_top)
     Intel,
+    /// No supported GPU detected
     None,
 }
 
+// ============================================================================
+// Main Monitor Structure
+// ============================================================================
+
+/// Monitors CPU, Memory, and GPU utilization.
+///
+/// CPU and Memory are updated synchronously via `update()`.
+/// GPU utilization is monitored by a background thread for better accuracy.
 pub struct UtilizationMonitor {
+    /// sysinfo system instance for CPU/Memory data
     sys: System,
+    
+    /// Current CPU usage percentage (0-100)
     pub cpu_usage: f32,
+    
+    /// Current memory usage percentage (0-100)
     pub memory_usage: f32,
+    
+    /// Total system memory in bytes
     pub memory_total: u64,
+    
+    /// Used system memory in bytes
     pub memory_used: u64,
+    
+    /// GPU usage percentage, updated by background thread
     pub gpu_usage: Arc<Mutex<f32>>,
+    
+    /// Detected GPU vendor (determines monitoring method)
     gpu_vendor: GpuVendor,
 }
 
+// ============================================================================
+// Implementation
+// ============================================================================
+
 impl UtilizationMonitor {
+    /// Create a new utilization monitor.
+    ///
+    /// Automatically detects GPU vendor and spawns a background thread
+    /// for GPU monitoring if a supported GPU is found.
     pub fn new() -> Self {
-        // Shared GPU usage value
+        // Shared GPU usage value for thread-safe access
         let gpu_usage = Arc::new(Mutex::new(0.0f32));
         
-        // Detect GPU vendor
+        // Detect which GPU monitoring method to use
         let gpu_vendor = Self::detect_gpu_vendor();
         
-        // Spawn background thread for GPU monitoring
+        // Spawn background thread for GPU monitoring (if GPU detected)
         if gpu_vendor != GpuVendor::None {
             let gpu_usage_clone = Arc::clone(&gpu_usage);
             std::thread::spawn(move || {
                 loop {
-                    // Update GPU usage every second for accuracy
+                    // Poll every second for smooth updates
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     
                     let usage = match gpu_vendor {
@@ -65,12 +137,16 @@ impl UtilizationMonitor {
         }
     }
 
+    /// Update CPU and memory statistics.
+    ///
+    /// Should be called at the configured update interval (default: 1 second).
+    /// GPU usage is updated by the background thread, not here.
     pub fn update(&mut self) {
-        // Update CPU usage
+        // Refresh CPU usage (requires multiple calls for accurate averaging)
         self.sys.refresh_cpu_all();
         self.cpu_usage = self.sys.global_cpu_usage();
 
-        // Update memory usage
+        // Refresh memory statistics
         self.sys.refresh_memory();
         self.memory_used = self.sys.used_memory();
         self.memory_total = self.sys.total_memory();
@@ -80,39 +156,52 @@ impl UtilizationMonitor {
             0.0
         };
         
-        // GPU usage is updated in background thread, no action needed here
+        // Note: GPU usage is updated in background thread
     }
     
-    /// Get current GPU usage from the Arc<Mutex>
+    /// Get current GPU usage percentage.
+    ///
+    /// Thread-safe read from the background-updated value.
+    /// Returns 0.0 if no GPU is detected or monitoring failed.
     pub fn get_gpu_usage(&self) -> f32 {
         *self.gpu_usage.lock().unwrap()
     }
     
-    /// Detect which GPU vendor is present
+    // ========================================================================
+    // GPU Vendor Detection
+    // ========================================================================
+    
+    /// Detect which GPU vendor is present on the system.
+    ///
+    /// Checks for:
+    /// 1. nvidia-smi binary (NVIDIA)
+    /// 2. radeontop or rocm-smi (AMD)
+    /// 3. intel_gpu_top (Intel)
+    /// 4. sysfs driver detection (fallback)
     fn detect_gpu_vendor() -> GpuVendor {
-        // Check for NVIDIA
+        // Check for NVIDIA first (most common discrete GPU)
         if std::path::Path::new("/usr/bin/nvidia-smi").exists() {
             return GpuVendor::Nvidia;
         }
         
-        // Check for AMD (radeontop or rocm-smi)
+        // Check for AMD tools
         if std::path::Path::new("/usr/bin/radeontop").exists() 
             || std::path::Path::new("/opt/rocm/bin/rocm-smi").exists() {
             return GpuVendor::Amd;
         }
         
-        // Check for Intel (intel_gpu_top)
+        // Check for Intel tools
         if std::path::Path::new("/usr/bin/intel_gpu_top").exists() {
             return GpuVendor::Intel;
         }
         
-        // Also check sysfs for GPU presence
+        // Fallback: Check sysfs for GPU driver information
         if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 
-                // AMD GPUs show up as card0, card1, etc. with amdgpu driver
+                // Look for card devices (card0, card1, etc.), not render nodes
                 if name_str.starts_with("card") && !name_str.contains("-") {
                     if let Ok(device_path) = std::fs::read_link(entry.path()) {
                         let device_str = device_path.to_string_lossy();
@@ -130,7 +219,13 @@ impl UtilizationMonitor {
         GpuVendor::None
     }
     
-    /// Fetch NVIDIA GPU utilization via nvidia-smi (called from background thread)
+    // ========================================================================
+    // GPU Usage Fetching (called from background thread)
+    // ========================================================================
+    
+    /// Fetch NVIDIA GPU utilization via nvidia-smi.
+    ///
+    /// Parses the CSV output for GPU utilization percentage.
     fn fetch_nvidia_gpu_usage() -> Option<f32> {
         let output = Command::new("nvidia-smi")
             .arg("--query-gpu=utilization.gpu")
@@ -146,9 +241,11 @@ impl UtilizationMonitor {
         }
     }
     
-    /// Fetch AMD GPU utilization via sysfs (called from background thread)
+    /// Fetch AMD GPU utilization.
+    ///
+    /// Prefers sysfs (no external tools needed), falls back to radeontop.
     fn fetch_amd_gpu_usage() -> Option<f32> {
-        // Try reading from sysfs first (most reliable, no external tools needed)
+        // Primary method: Read from sysfs (most reliable, no permissions needed)
         // AMD GPUs expose utilization in /sys/class/drm/card*/device/gpu_busy_percent
         if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
             for entry in entries.flatten() {
@@ -166,7 +263,7 @@ impl UtilizationMonitor {
             }
         }
         
-        // Fallback to radeontop if available (requires sudo or specific permissions)
+        // Fallback: radeontop (requires permissions)
         if std::path::Path::new("/usr/bin/radeontop").exists() {
             let output = Command::new("radeontop")
                 .arg("-d")
@@ -178,7 +275,7 @@ impl UtilizationMonitor {
             if let Ok(output) = output {
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
-                    // Parse radeontop output (format: "gpu 45.67%")
+                    // Parse "gpu 45.67%" format
                     for line in stdout.lines() {
                         if line.contains("gpu") {
                             if let Some(percent_str) = line.split_whitespace().nth(1) {
@@ -197,19 +294,19 @@ impl UtilizationMonitor {
         None
     }
     
-    /// Fetch Intel GPU utilization via sysfs (called from background thread)
+    /// Fetch Intel GPU utilization.
+    ///
+    /// Calculates from frequency ratio (current/max), falls back to intel_gpu_top.
     fn fetch_intel_gpu_usage() -> Option<f32> {
-        // Intel GPUs expose utilization in /sys/class/drm/card*/gt/gt*/rps_cur_freq_mhz
-        // and /sys/class/drm/card*/gt/gt*/rps_max_freq_mhz
-        // We can calculate usage as (current_freq / max_freq) * 100
-        
+        // Primary method: Calculate usage from frequency ratio
+        // Intel GPUs expose frequency in sysfs
         if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 
                 if name_str.starts_with("card") && !name_str.contains("-") {
-                    // Try gt0 first (most common)
+                    // Try gt0 (most common)
                     let cur_freq_path = entry.path().join("gt/gt0/rps_cur_freq_mhz");
                     let max_freq_path = entry.path().join("gt/gt0/rps_max_freq_mhz");
                     
@@ -230,7 +327,7 @@ impl UtilizationMonitor {
             }
         }
         
-        // Fallback to intel_gpu_top if available (requires root or CAP_PERFMON)
+        // Fallback: intel_gpu_top (requires CAP_PERFMON or root)
         if std::path::Path::new("/usr/bin/intel_gpu_top").exists() {
             let output = Command::new("intel_gpu_top")
                 .arg("-J")
@@ -241,8 +338,7 @@ impl UtilizationMonitor {
             if let Ok(output) = output {
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
-                    // Parse JSON output for render/busy percentage
-                    // This is a simplified parser - a proper implementation would use serde_json
+                    // Simple JSON parsing for "busy" field
                     if let Some(busy_idx) = stdout.find("\"busy\":") {
                         let after_busy = &stdout[busy_idx + 8..];
                         if let Some(end_idx) = after_busy.find(|c: char| !c.is_numeric() && c != '.') {
@@ -259,7 +355,14 @@ impl UtilizationMonitor {
     }
 }
 
-/// Draw a CPU icon (simple chip representation)
+// ============================================================================
+// Drawing Helper Functions
+// ============================================================================
+// These functions draw icons using Cairo for the utilization section.
+
+/// Draw a CPU icon (chip with pins).
+///
+/// Used in the utilization section header.
 pub fn draw_cpu_icon(cr: &cairo::Context, x: f64, y: f64, size: f64) {
     // Draw chip body
     cr.rectangle(x, y, size, size);

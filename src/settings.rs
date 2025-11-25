@@ -1,6 +1,30 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Settings application for the system monitor
+//! Settings Application for COSMIC Monitor
+//!
+//! This module implements a standalone settings application that provides a
+//! comprehensive GUI for configuring all aspects of the monitoring widget.
+//!
+//! # Features
+//!
+//! - **Toggle monitoring sections**: Enable/disable CPU, Memory, GPU, etc.
+//! - **Configure display options**: Clock format, percentages, temperatures
+//! - **Weather configuration**: API key and location settings
+//! - **Notification settings**: Enable and set max notification count
+//! - **Media player settings**: Cider API token configuration
+//! - **Widget positioning**: Set X/Y coordinates or drag while settings open
+//! - **Section reordering**: Change the order of widget sections
+//! - **Advanced options**: Debug logging toggle
+//!
+//! # Architecture
+//!
+//! The settings app is a separate binary (`cosmic-monitor-settings`) that:
+//! - Reads/writes the same config as the applet and widget via cosmic-config
+//! - Enables "movable mode" while open so users can drag the widget
+//! - Can restart the widget to apply changes via "Save & Apply"
+//!
+//! Changes are saved immediately when toggles change, allowing the widget
+//! to pick them up on its next config poll (typically within 1 second).
 
 use crate::config::{Config, WidgetSection};
 use crate::fl;
@@ -11,25 +35,50 @@ use cosmic::Application;
 use cosmic::Element;
 use serde::{Deserialize, Serialize};
 
+// ============================================================================
+// Widget Cache Structures
+// ============================================================================
+// The widget caches discovered devices (batteries, disks) to a JSON file.
+// The settings app reads this cache to display device information and allow
+// users to remove stale entries.
+
+/// Cached battery device information from Solaar or system.
+///
+/// The widget discovers battery devices at runtime and caches them so the
+/// settings app can display them without requiring the same device access.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CachedBatteryDevice {
+    /// Device name (e.g., "MX Master 3" or "BAT0")
     pub name: String,
+    /// Device type (e.g., "Mouse", "Keyboard", or None for system batteries)
     pub kind: Option<String>,
 }
 
+/// Cache file structure for widget-discovered information.
+///
+/// This cache allows the settings app to show what devices/disks the widget
+/// has found, without needing to probe the system itself.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WidgetCache {
+    /// Mounted disks discovered by the storage monitor
     pub disks: Vec<CachedDiskInfo>,
+    /// Battery devices from system or Solaar integration
     pub battery_devices: Vec<CachedBatteryDevice>,
 }
 
+/// Cached disk information for storage display.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CachedDiskInfo {
+    /// Disk name (e.g., "nvme0n1p1")
     pub name: String,
+    /// Mount point path (e.g., "/home")
     pub mount_point: String,
 }
 
 impl WidgetCache {
+    /// Returns the path to the cache file.
+    ///
+    /// Located at `~/.cache/cosmic-monitor-applet/widget_cache.json`
     fn cache_path() -> std::path::PathBuf {
         let mut path = dirs::cache_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
         path.push("cosmic-monitor-applet");
@@ -38,6 +87,7 @@ impl WidgetCache {
         path
     }
 
+    /// Load the cache from disk, returning default if file doesn't exist.
     fn load() -> Self {
         let path = Self::cache_path();
         if let Ok(content) = std::fs::read_to_string(&path) {
@@ -47,6 +97,7 @@ impl WidgetCache {
         }
     }
 
+    /// Save the cache to disk.
     fn save(&self) {
         let path = Self::cache_path();
         if let Ok(json) = serde_json::to_string_pretty(self) {
@@ -55,70 +106,158 @@ impl WidgetCache {
     }
 }
 
-/// The settings model
+// ============================================================================
+// Application Model
+// ============================================================================
+
+/// Main application state for the settings window.
+///
+/// Holds the current configuration, text input states for editable fields,
+/// and cached device information from the widget.
 pub struct SettingsApp {
-    /// Application state which is managed by the COSMIC runtime.
+    /// COSMIC runtime core for window management and styling
     core: cosmic::app::Core,
-    /// Configuration data that persists between application runs.
+    
+    /// Current configuration (modified as user changes settings)
     config: Config,
-    /// Helper to save config changes.
+    
+    /// Handle to cosmic-config for saving configuration
     config_handler: Option<cosmic_config::Config>,
-    /// Temporary state for the interval text input
+    
+    // Text input states - these hold the current text in input fields,
+    // which may be invalid (e.g., non-numeric). Only valid values are
+    // written to config.
+    
+    /// Update interval input (milliseconds)
     interval_input: String,
-    /// Temporary state for X position input
+    /// Widget X position input (pixels)
     x_input: String,
-    /// Temporary state for Y position input
+    /// Widget Y position input (pixels)
     y_input: String,
-    /// Temporary state for weather API key
+    /// OpenWeatherMap API key input
     weather_api_key_input: String,
-    /// Temporary state for weather location
+    /// Weather location input (city name or coordinates)
     weather_location_input: String,
-    /// Temporary state for max notifications input
+    /// Maximum notifications count input
     max_notifications_input: String,
-    /// Temporary state for Cider API token
+    /// Cider REST API token input
     cider_api_token_input: String,
-    /// Cached battery devices
+    /// Cached battery devices from widget discovery
     cached_devices: Vec<CachedBatteryDevice>,
 }
 
-/// Messages emitted by the settings app
+// ============================================================================
+// Message Types
+// ============================================================================
+
+/// Messages that drive the settings app state machine.
+///
+/// Each variant corresponds to a user action (toggle, text input, button click)
+/// or system event (config update, window close).
 #[derive(Debug, Clone)]
 pub enum Message {
+    // === Config sync ===
+    /// Configuration changed externally - update our view
     UpdateConfig(Config),
+    
+    // === Utilization toggles ===
+    /// Toggle CPU usage monitoring
     ToggleCpu(bool),
+    /// Toggle Memory usage monitoring
     ToggleMemory(bool),
+    /// Toggle Network monitoring (not yet in reorderable sections)
     ToggleNetwork(bool),
+    /// Toggle Disk I/O monitoring (not yet in reorderable sections)
     ToggleDisk(bool),
+    /// Toggle Storage space display
     ToggleStorage(bool),
+    /// Toggle GPU usage monitoring
     ToggleGpu(bool),
+    
+    // === Temperature toggles ===
+    /// Toggle CPU temperature display
     ToggleCpuTemp(bool),
+    /// Toggle GPU temperature display
     ToggleGpuTemp(bool),
+    /// Toggle between circular gauge and text temperature display
     ToggleCircularTempDisplay(bool),
+    
+    // === Clock/Date toggles ===
+    /// Toggle clock display
     ToggleClock(bool),
+    /// Toggle date display
     ToggleDate(bool),
+    /// Toggle between 24-hour and 12-hour time format
     Toggle24HourTime(bool),
+    
+    // === Display option toggles ===
+    /// Toggle percentage values on utilization bars
     TogglePercentages(bool),
+    
+    // === Battery toggles ===
+    /// Toggle battery section visibility
     ToggleBatterySection(bool),
+    /// Toggle Solaar integration for Logitech device batteries
     ToggleSolaarIntegration(bool),
+    /// Remove a cached battery device by index
     RemoveCachedDevice(usize),
+    
+    // === Notification settings ===
+    /// Toggle notifications section
     ToggleNotifications(bool),
+    /// Update max notifications count (text input)
     UpdateMaxNotifications(String),
+    
+    // === Media player settings ===
+    /// Toggle media player section
     ToggleMedia(bool),
+    /// Update Cider API token (text input)
     UpdateCiderApiToken(String),
+    
+    // === Interval and position ===
+    /// Update polling interval (text input)
     UpdateInterval(String),
+    /// Update widget X position (text input)
     UpdateX(String),
+    /// Update widget Y position (text input)
     UpdateY(String),
+    
+    // === Weather settings ===
+    /// Toggle weather display
     ToggleWeather(bool),
+    /// Update OpenWeatherMap API key (text input)
     UpdateWeatherApiKey(String),
+    /// Update weather location (text input)
     UpdateWeatherLocation(String),
+    
+    // === Widget behavior ===
+    /// Toggle auto-start widget when panel loads
     ToggleWidgetAutostart(bool),
+    /// Toggle debug logging to file
+    ToggleLogging(bool),
+    
+    // === Section reordering ===
+    /// Move a section up in the order list
     MoveSectionUp(usize),
+    /// Move a section down in the order list
     MoveSectionDown(usize),
+    
+    // === Actions ===
+    /// Save config and restart the widget
     SaveAndApply,
+    /// Settings window close requested
     CloseRequested,
 }
 
+// ============================================================================
+// Helper Methods
+// ============================================================================
+
 impl SettingsApp {
+    /// Persist configuration changes to disk.
+    ///
+    /// Called after every toggle/input change for immediate persistence.
+    /// The widget polls config periodically and will pick up changes.
     fn save_config(&self) {
         if let Some(ref config_handler) = self.config_handler {
             if let Err(err) = self.config.write_entry(config_handler) {
@@ -128,18 +267,16 @@ impl SettingsApp {
     }
 }
 
-/// Create a COSMIC application from the settings model
+// ============================================================================
+// COSMIC Application Implementation
+// ============================================================================
+
 impl Application for SettingsApp {
-    /// The async executor that will be used to run your application's commands.
     type Executor = cosmic::executor::Default;
-
-    /// Data that your application receives to its init method.
     type Flags = ();
-
-    /// Messages which the application and its widgets will emit.
     type Message = Message;
 
-    /// Unique identifier in RDNN (reverse domain name notation) format.
+    /// Settings app ID - distinct from the main applet to allow separate windows.
     const APP_ID: &'static str = "com.github.zoliviragh.CosmicMonitor.Settings";
 
     fn core(&self) -> &cosmic::app::Core {
@@ -150,15 +287,22 @@ impl Application for SettingsApp {
         &mut self.core
     }
 
+    /// Handle window close - disable widget movement mode before closing.
     fn on_close_requested(&self, _id: cosmic::iced::window::Id) -> Option<Message> {
         Some(Message::CloseRequested)
     }
 
-    /// Initializes the application with any given flags and startup commands.
+    /// Initialize the settings application.
+    ///
+    /// - Loads current configuration
+    /// - Migrates old configs (adds new sections if missing)
+    /// - Enables widget movement mode
+    /// - Loads cached device information
     fn init(
         core: cosmic::app::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
+        // Load config from the main app's config path (not the settings app path)
         let config_handler = cosmic_config::Config::new(
             "com.github.zoliviragh.CosmicMonitor",
             Config::VERSION,
@@ -173,9 +317,12 @@ impl Application for SettingsApp {
             })
             .unwrap_or_default();
 
-        // Migrate old configs: add Battery to section_order if missing
+        // === Config Migration ===
+        // When new sections are added to the app, existing configs won't have them.
+        // This ensures users don't lose access to new features.
+        
+        // Add Battery section if missing (added in v1.x)
         if !config.section_order.iter().any(|s| matches!(s, WidgetSection::Battery)) {
-            // Find position after Storage or before Weather
             if let Some(storage_pos) = config.section_order.iter().position(|s| matches!(s, WidgetSection::Storage)) {
                 config.section_order.insert(storage_pos + 1, WidgetSection::Battery);
             } else if let Some(weather_pos) = config.section_order.iter().position(|s| matches!(s, WidgetSection::Weather)) {
@@ -185,24 +332,24 @@ impl Application for SettingsApp {
             }
         }
 
-        // Migrate old configs: add Notifications to section_order if missing
+        // Add Notifications section if missing
         if !config.section_order.iter().any(|s| matches!(s, WidgetSection::Notifications)) {
-            // Add at the end
             config.section_order.push(WidgetSection::Notifications);
         }
 
-        // Migrate old configs: add Media to section_order if missing
+        // Add Media section if missing
         if !config.section_order.iter().any(|s| matches!(s, WidgetSection::Media)) {
-            // Add at the end
             config.section_order.push(WidgetSection::Media);
         }
 
-        // Enable widget movement when settings window is open
+        // Enable widget movement while settings window is open
+        // This allows users to drag the widget to reposition it
         config.widget_movable = true;
         if let Some(ref handler) = config_handler {
             let _ = config.write_entry(handler);
         }
 
+        // Initialize text inputs from current config values
         let interval_input = format!("{}", config.update_interval_ms);
         let x_input = format!("{}", config.widget_x);
         let y_input = format!("{}", config.widget_y);
@@ -211,7 +358,7 @@ impl Application for SettingsApp {
         let max_notifications_input = config.max_notifications.to_string();
         let cider_api_token_input = config.cider_api_token.clone();
         
-        // Load cached battery devices
+        // Load cached battery devices from widget's cache file
         let cache = WidgetCache::load();
         let cached_devices = cache.battery_devices.clone();
 
@@ -232,13 +379,30 @@ impl Application for SettingsApp {
         (app, Task::none())
     }
 
-    /// Displays the application's interface.
+    /// Render the settings UI.
+    ///
+    /// The UI is organized into sections matching the widget's features:
+    /// - Monitoring Options (CPU, Memory, GPU, Network, Disk)
+    /// - Storage Display
+    /// - Temperature Display
+    /// - Widget Display (Clock, Date, Time format)
+    /// - Display Options (Percentages)
+    /// - Battery (including Solaar and cached devices)
+    /// - Weather
+    /// - Notifications
+    /// - Media Player
+    /// - Layout Order (drag-to-reorder sections)
+    /// - Widget Position
+    /// - Advanced (logging)
     fn view(&self) -> Element<Self::Message> {
         let mut content = widget::column()
             .spacing(12)
             .padding(24)
+            // === Header ===
             .push(widget::text::title1(fl!("app-title")))
             .push(widget::divider::horizontal::default())
+            
+            // === Monitoring Options Section ===
             .push(widget::text::heading(fl!("monitoring-options")))
             .push(widget::settings::item(
                 fl!("show-cpu"),
@@ -261,12 +425,16 @@ impl Application for SettingsApp {
                 widget::toggler(self.config.show_disk).on_toggle(Message::ToggleDisk),
             ))
             .push(widget::divider::horizontal::default())
+            
+            // === Storage Display Section ===
             .push(widget::text::heading(fl!("storage-display")))
             .push(widget::settings::item(
                 fl!("show-storage"),
                 widget::toggler(self.config.show_storage).on_toggle(Message::ToggleStorage),
             ))
             .push(widget::divider::horizontal::default())
+            
+            // === Temperature Display Section ===
             .push(widget::text::heading(fl!("temperature-display")))
             .push(widget::settings::item(
                 fl!("show-cpu-temp"),
@@ -281,6 +449,8 @@ impl Application for SettingsApp {
                 widget::toggler(self.config.use_circular_temp_display).on_toggle(Message::ToggleCircularTempDisplay),
             ))
             .push(widget::divider::horizontal::default())
+            
+            // === Widget Display Section (Clock/Date) ===
             .push(widget::text::heading(fl!("widget-display")))
             .push(widget::settings::item(
                 fl!("show-clock"),
@@ -295,12 +465,16 @@ impl Application for SettingsApp {
                 widget::toggler(self.config.use_24hour_time).on_toggle(Message::Toggle24HourTime),
             ))
             .push(widget::divider::horizontal::default())
+            
+            // === Display Options Section ===
             .push(widget::text::heading(fl!("display-options")))
             .push(widget::settings::item(
                 fl!("show-percentages"),
                 widget::toggler(self.config.show_percentages).on_toggle(Message::TogglePercentages),
             ))
             .push(widget::divider::horizontal::default())
+            
+            // === Battery Section ===
             .push(widget::text::heading("Battery"))
             .push(widget::settings::item(
                 "Show battery section",
@@ -313,7 +487,7 @@ impl Application for SettingsApp {
                     .on_toggle(Message::ToggleSolaarIntegration),
             ));
         
-        // Add cached battery devices list
+        // Display cached battery devices with remove buttons
         if !self.cached_devices.is_empty() {
             content = content.push(widget::text::body("Cached Devices:"));
             
@@ -337,11 +511,14 @@ impl Application for SettingsApp {
         }
         
         content = content
+            // === Update Interval ===
             .push(widget::settings::item(
                 fl!("update-interval"),
                 widget::text_input("", &self.interval_input).on_input(Message::UpdateInterval),
             ))
             .push(widget::divider::horizontal::default())
+            
+            // === Weather Display Section ===
             .push(widget::text::heading(fl!("weather-display")))
             .push(widget::settings::item(
                 fl!("show-weather"),
@@ -359,6 +536,8 @@ impl Application for SettingsApp {
                     .on_input(Message::UpdateWeatherLocation),
             ))
             .push(widget::divider::horizontal::default())
+            
+            // === Notifications Section ===
             .push(widget::text::heading("Notifications"))
             .push(widget::settings::item(
                 "Show Notifications",
@@ -371,6 +550,8 @@ impl Application for SettingsApp {
                     .on_input(Message::UpdateMaxNotifications),
             ))
             .push(widget::divider::horizontal::default())
+            
+            // === Media Player Section ===
             .push(widget::text::heading("Media Player"))
             .push(widget::settings::item(
                 "Show Media Player",
@@ -384,11 +565,14 @@ impl Application for SettingsApp {
             ))
             .push(widget::text::body("Displays currently playing track from Cider (Apple Music client)"))
             .push(widget::divider::horizontal::default())
+            
+            // === Layout Order Section ===
             .push(widget::text::heading(fl!("layout-order")))
             .push(widget::text::body(fl!("layout-order-description")));
         
-        // Add section order list with up/down buttons
+        // Render section order list with up/down move buttons
         for (index, section) in self.config.section_order.iter().enumerate() {
+            // Up button (disabled if at top)
             let up_button = if index > 0 {
                 widget::button::icon(widget::icon::from_name("go-up-symbolic"))
                     .on_press(Message::MoveSectionUp(index))
@@ -398,6 +582,7 @@ impl Application for SettingsApp {
                     .padding(4)
             };
             
+            // Down button (disabled if at bottom)
             let down_button = if index < self.config.section_order.len() - 1 {
                 widget::button::icon(widget::icon::from_name("go-down-symbolic"))
                     .on_press(Message::MoveSectionDown(index))
@@ -420,6 +605,8 @@ impl Application for SettingsApp {
         
         content = content
             .push(widget::divider::horizontal::default())
+            
+            // === Widget Position Section ===
             .push(widget::text::heading("Widget Position"))
             .push(widget::settings::item(
                 fl!("widget-autostart"),
@@ -434,6 +621,18 @@ impl Application for SettingsApp {
                 "Y Position",
                 widget::text_input("", &self.y_input).on_input(Message::UpdateY),
             ))
+            .push(widget::divider::horizontal::default())
+            
+            // === Advanced Section ===
+            .push(widget::text::heading("Advanced"))
+            .push(widget::settings::item(
+                "Enable Debug Logging",
+                widget::toggler(self.config.enable_logging)
+                    .on_toggle(Message::ToggleLogging),
+            ))
+            .push(widget::text::body("Writes debug logs to /tmp/cosmic-monitor.log"))
+            
+            // === Save & Apply Button ===
             .push(
                 widget::row()
                     .spacing(8)
@@ -445,6 +644,7 @@ impl Application for SettingsApp {
                     .push(widget::column().width(cosmic::iced::Length::Fill))
             );
 
+        // Wrap in scrollable container for smaller screens
         let scrollable_content = widget::scrollable(content);
 
         widget::container(scrollable_content)
@@ -453,19 +653,28 @@ impl Application for SettingsApp {
             .into()
     }
 
-    /// Handles messages emitted by the application and its widgets.
+    /// Process messages and update application state.
+    ///
+    /// Most messages simply update a config field and save. Text inputs
+    /// validate their content before updating (e.g., interval must be 100-10000ms).
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
+            // === Config Sync ===
             Message::UpdateConfig(config) => {
                 self.config = config;
             }
+            
+            // === Window Close ===
             Message::CloseRequested => {
-                // Disable widget movement when settings window closes
+                // Disable widget movement when settings closes
                 self.config.widget_movable = false;
                 self.save_config();
                 return cosmic::iced::window::get_latest()
                     .and_then(|id| cosmic::iced::window::close(id));
             }
+            
+            // === Simple Toggle Messages ===
+            // Each toggle updates config and saves immediately
             Message::ToggleCpu(enabled) => {
                 self.config.show_cpu = enabled;
                 self.save_config();
@@ -526,21 +735,25 @@ impl Application for SettingsApp {
                 self.config.enable_solaar_integration = enabled;
                 self.save_config();
             }
+            
+            // === Battery Device Cache ===
             Message::RemoveCachedDevice(index) => {
                 if index < self.cached_devices.len() {
                     self.cached_devices.remove(index);
-                    
-                    // Update the cache file
+                    // Persist to cache file
                     let mut cache = WidgetCache::load();
                     cache.battery_devices = self.cached_devices.clone();
                     cache.save();
                 }
             }
+            
+            // === Notification Settings ===
             Message::ToggleNotifications(enabled) => {
                 self.config.show_notifications = enabled;
                 self.save_config();
             }
             Message::UpdateMaxNotifications(value) => {
+                // Validate: must be 1-20
                 if let Ok(max) = value.parse::<usize>() {
                     if max > 0 && max <= 20 {
                         self.config.max_notifications = max;
@@ -548,6 +761,8 @@ impl Application for SettingsApp {
                     }
                 }
             }
+            
+            // === Media Settings ===
             Message::ToggleMedia(enabled) => {
                 self.config.show_media = enabled;
                 self.save_config();
@@ -557,8 +772,11 @@ impl Application for SettingsApp {
                 self.config.cider_api_token = value;
                 self.save_config();
             }
+            
+            // === Interval Setting ===
             Message::UpdateInterval(value) => {
                 self.interval_input = value.clone();
+                // Validate: must be 100-10000ms
                 if let Ok(interval) = value.parse::<u64>() {
                     if interval >= 100 && interval <= 10000 {
                         self.config.update_interval_ms = interval;
@@ -566,6 +784,8 @@ impl Application for SettingsApp {
                     }
                 }
             }
+            
+            // === Position Settings ===
             Message::UpdateX(value) => {
                 self.x_input = value.clone();
                 if let Ok(x) = value.parse::<i32>() {
@@ -580,12 +800,18 @@ impl Application for SettingsApp {
                     self.save_config();
                 }
             }
+            
+            // === Weather Settings ===
             Message::ToggleWeather(enabled) => {
                 self.config.show_weather = enabled;
                 self.save_config();
             }
             Message::ToggleWidgetAutostart(enabled) => {
                 self.config.widget_autostart = enabled;
+                self.save_config();
+            }
+            Message::ToggleLogging(enabled) => {
+                self.config.enable_logging = enabled;
                 self.save_config();
             }
             Message::UpdateWeatherApiKey(value) => {
@@ -598,6 +824,8 @@ impl Application for SettingsApp {
                 self.config.weather_location = value;
                 self.save_config();
             }
+            
+            // === Section Reordering ===
             Message::MoveSectionUp(index) => {
                 if index > 0 && index < self.config.section_order.len() {
                     self.config.section_order.swap(index, index - 1);
@@ -610,13 +838,16 @@ impl Application for SettingsApp {
                     self.save_config();
                 }
             }
+            
+            // === Save & Apply Action ===
             Message::SaveAndApply => {
-                // Save all current settings to ensure they're persisted
+                // Ensure all settings are persisted
                 self.save_config();
                 
-                // Restart the widget to apply all settings
+                // Restart widget to apply changes that require restart
                 eprintln!("Save & Apply clicked! Restarting widget with current settings.");
                 
+                // Kill existing widget process
                 match std::process::Command::new("pkill")
                     .arg("-f")
                     .arg("cosmic-monitor-widget")
@@ -625,9 +856,11 @@ impl Application for SettingsApp {
                     Err(e) => eprintln!("pkill error: {:?}", e),
                 }
                 
+                // Brief delay for process cleanup
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 
-                match std::process::Command::new("./target/release/cosmic-monitor-widget")
+                // Spawn new widget using installed binary (from PATH)
+                match std::process::Command::new("cosmic-monitor-widget")
                     .spawn() {
                     Ok(child) => eprintln!("Widget spawned with PID: {:?}", child.id()),
                     Err(e) => eprintln!("Spawn error: {:?}", e),

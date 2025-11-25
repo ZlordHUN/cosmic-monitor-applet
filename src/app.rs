@@ -1,5 +1,26 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Panel Applet UI and Logic
+//!
+//! This module implements the COSMIC panel applet - a small icon in the panel
+//! that provides quick access to the monitoring widget and settings.
+//!
+//! # Features
+//!
+//! - **Panel Icon**: Displays a system monitor icon (`utilities-system-monitor-symbolic`)
+//! - **Popup Menu**: Shows options to show/hide the widget and open settings
+//! - **Widget Management**: Spawns and kills the standalone widget process
+//! - **Auto-start**: Optionally launches the widget when the applet loads
+//!
+//! # Architecture
+//!
+//! The applet uses the `cosmic::Application` trait to integrate with the COSMIC
+//! desktop. It maintains minimal state - just tracking whether the widget is
+//! running and the current configuration.
+//!
+//! The actual monitoring widget runs as a separate process (`cosmic-monitor-widget`)
+//! to allow for layer-shell positioning and independent lifecycle management.
+
 use crate::config::Config;
 use crate::fl;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -9,36 +30,79 @@ use cosmic::prelude::*;
 use cosmic::widget;
 use futures_util::SinkExt;
 
-/// The application model stores app-specific state used to describe its interface and
-/// drive its logic.
+// ============================================================================
+// Application Model
+// ============================================================================
+
+/// Main application state for the panel applet.
+///
+/// This struct holds all runtime state needed to render the UI and handle
+/// user interactions. It's managed by the COSMIC/iced runtime.
 #[derive(Default)]
 pub struct AppModel {
-    /// Application state which is managed by the COSMIC runtime.
+    /// COSMIC runtime core - provides access to system integration features
+    /// like window management, styling, and configuration watching.
     core: cosmic::Core,
-    /// The popup id.
+    
+    /// Window ID of the currently open popup, if any.
+    /// Used to track and close the popup when clicking elsewhere.
     popup: Option<Id>,
-    /// Configuration data that persists between application runs.
+    
+    /// Current configuration loaded from cosmic-config.
+    /// Updated via subscription when settings change externally.
     config: Config,
-    /// Helper to save config changes.
+    
+    /// Handle to cosmic-config for saving configuration changes.
+    /// None if config system failed to initialize.
     config_handler: Option<cosmic_config::Config>,
-    /// Temporary state for the interval text input
+    
+    /// Text input state for the update interval field.
+    /// Kept separate to allow editing without immediately saving.
     interval_input: String,
-    /// Track if widget is currently running
+    
+    /// Whether the widget process is currently running.
+    /// Updated when opening the popup and after toggle operations.
     widget_running: bool,
 }
 
-/// Messages emitted by the application and its widgets.
+// ============================================================================
+// Message Types
+// ============================================================================
+
+/// Messages that drive the applet's state machine.
+///
+/// Each variant represents a user action or system event that the applet
+/// needs to respond to.
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// User clicked the panel icon - toggle popup visibility.
     TogglePopup,
+    
+    /// Popup window was closed (clicked outside or pressed escape).
     PopupClosed(Id),
+    
+    /// Subscription channel initialized (used for async setup).
     SubscriptionChannel,
+    
+    /// Configuration changed externally (e.g., from settings app).
     UpdateConfig(Config),
+    
+    /// User clicked "Show/Hide Widget" in the popup menu.
     ToggleWidget,
+    
+    /// User clicked "Configure" in the popup menu.
     OpenSettings,
 }
 
+// ============================================================================
+// Helper Methods
+// ============================================================================
+
 impl AppModel {
+    /// Persists the current configuration to disk.
+    ///
+    /// Called after any configuration change (like toggling auto-start).
+    /// Silently logs errors rather than panicking.
     fn save_config(&self) {
         if let Some(ref config_handler) = self.config_handler {
             if let Err(err) = self.config.write_entry(config_handler) {
@@ -47,13 +111,21 @@ impl AppModel {
         }
     }
     
+    /// Checks if the widget process is currently running.
+    ///
+    /// Uses `pgrep` to search for the `cosmic-monitor-widget` process.
+    /// This is a simple but effective approach that doesn't require
+    /// tracking PIDs manually.
+    ///
+    /// # Returns
+    /// `true` if the widget process is found, `false` otherwise.
     fn check_widget_running() -> bool {
-        // Check if cosmic-monitor-widget process is running
         if let Ok(output) = std::process::Command::new("pgrep")
             .arg("-f")
             .arg("cosmic-monitor-widget")
             .output()
         {
+            // pgrep returns empty output if no matching process found
             !output.stdout.is_empty()
         } else {
             false
@@ -61,18 +133,25 @@ impl AppModel {
     }
 }
 
-/// Create a COSMIC application from the app model
+// ============================================================================
+// COSMIC Application Implementation
+// ============================================================================
+
 impl cosmic::Application for AppModel {
-    /// The async executor that will be used to run your application's commands.
+    /// Use COSMIC's default async executor (tokio-based).
     type Executor = cosmic::executor::Default;
 
-    /// Data that your application receives to its init method.
+    /// No initialization flags needed - configuration is loaded internally.
     type Flags = ();
 
-    /// Messages which the application and its widgets will emit.
+    /// The message type for this application.
     type Message = Message;
 
-    /// Unique identifier in RDNN (reverse domain name notation) format.
+    /// Unique application identifier in reverse domain name notation.
+    /// Used for:
+    /// - Configuration storage path (~/.config/cosmic/com.github.zoliviragh.CosmicMonitor/)
+    /// - D-Bus registration
+    /// - Desktop file identification
     const APP_ID: &'static str = "com.github.zoliviragh.CosmicMonitor";
 
     fn core(&self) -> &cosmic::Core {
@@ -83,29 +162,33 @@ impl cosmic::Application for AppModel {
         &mut self.core
     }
 
-    /// Initializes the application with any given flags and startup commands.
+    /// Initialize the applet when it's first loaded.
+    ///
+    /// This runs once when the panel starts or when the applet is added.
+    /// Loads configuration and optionally auto-starts the widget.
     fn init(
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
-        // Construct the app model with the runtime's core.
+        // Initialize cosmic-config handler for this app's configuration
         let config_handler = cosmic_config::Config::new(Self::APP_ID, Config::VERSION).ok();
         
+        // Load existing config or use defaults if none exists
         let config = config_handler
             .as_ref()
             .map(|context| match Config::get_entry(context) {
                 Ok(config) => config,
-                Err((_errors, config)) => config,
+                Err((_errors, config)) => config, // Use defaults on parse error
             })
             .unwrap_or_default();
 
+        // Initialize text input with current interval value
         let interval_input = format!("{}", config.update_interval_ms);
         
-        // Check if widget should auto-start
+        // Auto-start widget if configured to do so
         let widget_running = if config.widget_autostart {
-            // Try to launch the widget
             log::info!("Auto-start enabled, launching widget");
-            if let Ok(_) = std::process::Command::new("cosmic-monitor-widget").spawn() {
+            if std::process::Command::new("cosmic-monitor-widget").spawn().is_ok() {
                 log::info!("Widget auto-started successfully");
                 true
             } else {
@@ -113,7 +196,7 @@ impl cosmic::Application for AppModel {
                 false
             }
         } else {
-            // Check if widget is already running even if autostart is disabled
+            // Check if widget is already running (user may have started it manually)
             log::info!("Auto-start disabled, checking if widget is already running");
             Self::check_widget_running()
         };
@@ -130,15 +213,18 @@ impl cosmic::Application for AppModel {
         (app, Task::none())
     }
 
+    /// Handle window close requests.
+    ///
+    /// When the popup is closed by the user (clicking outside, pressing Esc),
+    /// this converts the close event into a PopupClosed message.
     fn on_close_requested(&self, id: Id) -> Option<Message> {
         Some(Message::PopupClosed(id))
     }
 
-    /// Describes the interface based on the current state of the application model.
+    /// Render the panel icon.
     ///
-    /// The applet's button in the panel will be drawn using the main view method.
-    /// This view should emit messages to toggle the applet's popup window, which will
-    /// be drawn using the `view_window` method.
+    /// This is what appears in the COSMIC panel. It's a simple icon button
+    /// that shows the system monitor icon and opens the popup when clicked.
     fn view(&self) -> Element<'_, Self::Message> {
         self.core
             .applet
@@ -147,26 +233,33 @@ impl cosmic::Application for AppModel {
             .into()
     }
 
-    /// The applet's popup window will be drawn using this view method. If there are
-    /// multiple poups, you may match the id parameter to determine which popup to
-    /// create a view for.
+    /// Render the popup menu content.
+    ///
+    /// Shows two options:
+    /// 1. "Show Widget" / "Hide Widget" - toggles the monitoring widget
+    /// 2. "Configure" - opens the settings application
+    ///
+    /// The popup uses COSMIC's standard applet popup styling.
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
+        // Dynamic text based on widget state
         let widget_text = if self.widget_running {
-            fl!("hide-widget")
+            fl!("hide-widget")  // From i18n: "Hide Widget"
         } else {
-            fl!("show-widget")
+            fl!("show-widget")  // From i18n: "Show Widget"
         };
 
         let content_list = widget::list_column()
             .padding(5)
             .spacing(0)
+            // Widget toggle button
             .add(widget::settings::item(
                 widget_text,
                 widget::button::icon(widget::icon::from_name("applications-system-symbolic"))
                     .on_press(Message::ToggleWidget)
             ))
+            // Settings button
             .add(widget::settings::item(
-                fl!("configure"),
+                fl!("configure"),  // From i18n: "Configure"
                 widget::button::icon(widget::icon::from_name("preferences-system-symbolic"))
                     .on_press(Message::OpenSettings)
             ));
@@ -174,107 +267,116 @@ impl cosmic::Application for AppModel {
         self.core.applet.popup_container(content_list).into()
     }
 
-    /// Register subscriptions for this application.
+    /// Set up background tasks and event listeners.
     ///
-    /// Subscriptions are long-lived async tasks running in the background which
-    /// emit messages to the application through a channel. They may be conditionally
-    /// activated by selectively appending to the subscription batch, and will
-    /// continue to execute for the duration that they remain in the batch.
+    /// Two subscriptions are active:
+    /// 1. A channel subscription (currently unused, placeholder for future features)
+    /// 2. Configuration watcher that syncs changes from settings app
     fn subscription(&self) -> Subscription<Self::Message> {
         struct MySubscription;
 
         Subscription::batch(vec![
-            // Create a subscription which emits updates through a channel.
+            // Placeholder subscription channel for future async features
             Subscription::run_with_id(
                 std::any::TypeId::of::<MySubscription>(),
                 cosmic::iced::stream::channel(4, move |mut channel| async move {
                     _ = channel.send(Message::SubscriptionChannel).await;
-
+                    // Keep the subscription alive indefinitely
                     futures_util::future::pending().await
                 }),
             ),
-            // Watch for application configuration changes.
+            // Watch for configuration changes from the settings app
+            // This keeps the applet in sync when settings are modified externally
             self.core()
                 .watch_config::<Config>(Self::APP_ID)
-                .map(|update| {
-                    // for why in update.errors {
-                    //     tracing::error!(?why, "app config error");
-                    // }
-
-                    Message::UpdateConfig(update.config)
-                }),
+                .map(|update| Message::UpdateConfig(update.config)),
         ])
     }
 
-    /// Handles messages emitted by the application and its widgets.
+    /// Process messages and update application state.
     ///
-    /// Tasks may be returned for asynchronous execution of code in the background
-    /// on the application's async runtime. The application will not exit until all
-    /// tasks are finished.
+    /// This is the heart of the iced architecture - all state changes
+    /// happen here in response to messages.
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
             Message::SubscriptionChannel => {
-                // For example purposes only.
+                // Placeholder for future async initialization
             }
+            
             Message::UpdateConfig(config) => {
+                // External config change (from settings app) - update our copy
                 self.config = config;
             }
+            
             Message::ToggleWidget => {
-                // Toggle widget visibility
                 if self.widget_running {
-                    // Try to kill widget (TODO: track PID properly)
+                    // Kill the widget process
                     log::info!("Stopping widget via pkill");
                     let _ = std::process::Command::new("pkill")
                         .arg("-f")
                         .arg("cosmic-monitor-widget")
                         .spawn();
                     self.widget_running = false;
-                    // Update config to not auto-start
+                    
+                    // Disable auto-start since user explicitly hid the widget
                     self.config.widget_autostart = false;
                     self.save_config();
                 } else {
-                    // Launch the widget
+                    // Launch the widget process
                     log::info!("Launching widget");
-                    if let Ok(_) = std::process::Command::new("cosmic-monitor-widget").spawn() {
+                    if std::process::Command::new("cosmic-monitor-widget").spawn().is_ok() {
                         self.widget_running = true;
-                        // Update config to auto-start
+                        
+                        // Enable auto-start since user explicitly showed the widget
                         self.config.widget_autostart = true;
                         self.save_config();
                         log::info!("Widget launched successfully");
                     } else {
-                        log::error!("Failed to launch widget");
+                        log::error!("Failed to launch widget - is cosmic-monitor-widget in PATH?");
                     }
                 }
             }
+            
             Message::OpenSettings => {
-                // Launch settings app
+                // Launch the settings application as a separate process
                 let _ = std::process::Command::new("cosmic-monitor-settings").spawn();
             }
+            
             Message::TogglePopup => {
                 return if let Some(p) = self.popup.take() {
+                    // Popup is open - close it
                     destroy_popup(p)
                 } else {
-                    // Check current widget status when opening popup
+                    // Popup is closed - open it
+                    // First refresh widget status (it may have been killed externally)
                     self.widget_running = Self::check_widget_running();
                     
+                    // Create a new popup window
                     let new_id = Id::unique();
                     self.popup.replace(new_id);
+                    
+                    // Configure popup positioning and size constraints
                     let mut popup_settings = self.core.applet.get_popup_settings(
                         self.core.main_window_id().unwrap(),
                         new_id,
-                        None,
-                        None,
-                        None,
+                        None,  // No keyboard interactivity
+                        None,  // Default anchor
+                        None,  // Default gravity
                     );
+                    
+                    // Set size limits for the popup
                     popup_settings.positioner.size_limits = Limits::NONE
                         .max_width(372.0)
                         .min_width(300.0)
                         .min_height(200.0)
                         .max_height(1080.0);
+                    
                     get_popup(popup_settings)
                 }
             }
+            
             Message::PopupClosed(id) => {
+                // Clear popup state when closed
                 if self.popup.as_ref() == Some(&id) {
                     self.popup = None;
                 }
@@ -283,6 +385,9 @@ impl cosmic::Application for AppModel {
         Task::none()
     }
 
+    /// Apply COSMIC applet styling.
+    ///
+    /// This ensures the applet matches the system theme and other applets.
     fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
         Some(cosmic::applet::style())
     }
