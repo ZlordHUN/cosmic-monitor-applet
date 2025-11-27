@@ -475,7 +475,7 @@ impl PointerHandler for MonitorWidget {
                         }
                     }
                     
-                    // Priority 4: Check media control buttons (previous, play/pause, next)
+                    // Priority 4: Check media control buttons (previous, play/pause, next, progress_bar)
                     if !handled {
                         for (button_name, x_start, y_start, x_end, y_end) in &self.media_button_bounds {
                             if click_x >= *x_start && click_x <= *x_end && click_y >= *y_start && click_y <= *y_end {
@@ -489,6 +489,14 @@ impl PointerHandler for MonitorWidget {
                                     }
                                     "previous" => {
                                         self.media.previous();
+                                    }
+                                    "progress_bar" => {
+                                        // Calculate progress based on click position within the bar
+                                        let bar_width = x_end - x_start;
+                                        let click_offset = click_x - x_start;
+                                        let progress = (click_offset / bar_width).clamp(0.0, 1.0);
+                                        log::info!("Progress bar clicked: {:.1}%", progress * 100.0);
+                                        self.media.seek_to_progress(progress);
                                     }
                                     _ => {}
                                 }

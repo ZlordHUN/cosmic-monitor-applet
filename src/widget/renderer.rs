@@ -208,7 +208,8 @@ pub struct RenderParams<'a> {
 /// Media button hit-test bounds: (button_name, x_start, y_start, x_end, y_end)
 ///
 /// Used for detecting clicks on media playback controls.
-/// Button names: "previous", "play_pause", "next"
+/// Button names: "previous", "play_pause", "next", "progress_bar"
+/// For progress_bar, x_start and x_end define the clickable area width.
 pub type MediaButtonBounds = Vec<(String, f64, f64, f64, f64)>;
 
 // ============================================================================
@@ -1877,6 +1878,10 @@ fn render_media(
     cr.set_line_width(1.0);
     cr.rectangle(bar_x, y_pos, bar_width, bar_height);
     cr.stroke().expect("Failed to stroke progress border");
+    
+    // Record progress bar bounds for seek interaction
+    // We use a slightly larger hit area for easier clicking
+    button_bounds.push(("progress_bar".to_string(), bar_x, y_pos - 4.0, bar_x + bar_width, y_pos + bar_height + 4.0));
     
     // Draw time on left and player name on right (below progress bar)
     y_pos += 10.0;

@@ -441,5 +441,61 @@ impl MediaMonitor {
         let mut info = self.media_info.lock().unwrap();
         info.status = PlaybackStatus::Playing;
     }
+    
+    /// Seek to a specific position in the current track.
+    ///
+    /// # Arguments
+    ///
+    /// * `position_seconds` - Target position in seconds from start of track
+    ///
+    /// # Returns
+    ///
+    /// `true` if seek command was sent successfully
+    pub fn seek(&self, position_seconds: f64) -> bool {
+        use std::process::Command;
+        
+        let token = self.cider_token.lock().unwrap().clone();
+        
+        let mut cmd = Command::new("curl");
+        cmd.args(&["-s", "-X", "POST", "--max-time", "1"]);
+        cmd.args(&["-H", "Content-Type: application/json"]);
+        
+        if let Some(t) = token {
+            cmd.args(&["-H", &format!("apptoken: {}", t)]);
+        }
+        
+        // Send position as JSON body
+        cmd.args(&["-d", &format!("{{\"position\": {}}}", position_seconds as u64)]);
+        cmd.arg("http://localhost:10767/api/v1/playback/seek");
+        
+        log::info!("Seeking to {} seconds", position_seconds);
+        
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                // Update local position for responsive UI
+                let mut info = self.media_info.lock().unwrap();
+                info.position = (position_seconds * 1000.0) as u64;
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// Seek to a position based on progress percentage.
+    ///
+    /// # Arguments
+    ///
+    /// * `progress` - Value between 0.0 and 1.0 representing position in track
+    ///
+    /// # Returns
+    ///
+    /// `true` if seek command was sent successfully
+    pub fn seek_to_progress(&self, progress: f64) -> bool {
+        let info = self.media_info.lock().unwrap();
+        let duration_seconds = info.duration as f64 / 1000.0;
+        drop(info); // Release lock before calling seek
+        
+        let target_seconds = duration_seconds * progress.clamp(0.0, 1.0);
+        self.seek(target_seconds)
+    }
 }
-
