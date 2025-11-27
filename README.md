@@ -32,7 +32,7 @@ A borderless floating widget that displays real-time system statistics for the C
 - **Multi-Vendor GPU Support**: Automatic detection and monitoring for NVIDIA (nvidia-smi), AMD (sysfs/radeontop), and Intel (sysfs/intel_gpu_top) GPUs
 - **Storage Monitoring**: Displays disk usage for system drives and external media with intelligent labeling (vendor + model names)
 - **Battery Monitoring**: Shows battery status for Logitech wireless devices (via Solaar) and gaming headsets (via HeadsetControl) with color-coded vertical battery icons, connection status, and immediate startup rendering
-- **Media Player Integration**: Real-time display of currently playing track from Cider (Apple Music client) with artist, album, progress bar, and playback time
+- **Media Player Integration**: Multi-source media player with support for Cider (Apple Music), browser audio (YouTube thumbnails), and any MPRIS-compatible player; includes album art, playback controls, and pagination dots for switching between active players
 - **Persistent Cache**: Remembers drives and peripherals to instantly display placeholders while loading fresh data
 - **Customizable Position**: Precise X/Y positioning via settings window
 - **Configurable Display**: Toggle individual stats (CPU, RAM, GPU, clock, date, temperatures, notifications), show/hide percentage values
@@ -107,7 +107,7 @@ Available options:
 - **Widget Display**: Toggle clock (12/24-hour format) and date displays independently
 - **Weather Display**: Toggle weather information, configure OpenWeatherMap API key and location (includes day/night icon variants)
 - **Notification Display**: Toggle notification monitoring with grouped display by application
-- **Media Display**: Toggle media player information display (currently supports Cider Apple Music client)
+- **Media Display**: Toggle media player information display with multi-source support (Cider, MPRIS players like browsers, Spotify, etc.)
 - **Layout Order**: Customize the order in which sections appear in the widget (Utilization, Temperatures, Storage, Battery, Weather, Notifications, Media)
 - **Display Options**: Show/hide percentage values next to progress bars
 - **Update Interval**: 100-10000ms refresh rate
@@ -200,16 +200,29 @@ The widget will display:
 
 ## Media Player Setup
 
-To enable media player display (currently supports Cider):
+The widget supports multiple media sources simultaneously with automatic detection and pagination.
 
-### Installing Cider
+### Supported Players
+
+- **Cider** (Apple Music client) - Primary source with full API integration
+- **Web Browsers** (Firefox, Chrome, etc.) - Via MPRIS D-Bus protocol
+- **Desktop Players** - Spotify, Audacious, VLC, and any MPRIS-compatible player
+
+### Album Art Support
+
+- **Cider**: Full album art from Apple Music
+- **YouTube** (in browser): Automatic thumbnail extraction from video URL
+- **Other browser media**: Falls back to browser icon (Firefox, Chrome, etc.)
+- **Local players**: Supports `mpris:artUrl` metadata and local file:// URLs
+
+### Installing Cider (Optional)
 
 [Cider](https://cider.sh/) is an open-source Apple Music client for Linux.
 
 1. Install Cider from their website or your package manager
 2. Sign in with your Apple Music account
 
-### Enabling the Cider API
+### Enabling the Cider API (Optional)
 
 1. Open Cider settings
 2. Navigate to the Connectivity section
@@ -221,13 +234,28 @@ To enable media player display (currently supports Cider):
 1. Open Settings from the applet menu
 2. Navigate to the Media Player section
 3. Enable "Show Media Player"
-4. If Cider requires an API token, enter it in the "Cider API Token" field (leave empty if authentication is disabled in Cider)
+4. If using Cider with authentication, enter your API token (leave empty otherwise)
+
+### Multi-Player Navigation
+
+When multiple media sources are active (e.g., Cider and browser audio):
+- **Pagination dots** appear at the bottom of the media panel
+- **Click a dot** to switch between players
+- **Playing sources** are prioritized over paused ones
+- The widget remembers your selection when switching
+
+### Playback Controls
+
+The widget provides interactive playback controls:
+- **Previous/Next** buttons to skip tracks
+- **Play/Pause** button to control playback
+- **Progress bar** - click to seek within the track
 
 The widget will display:
 - Track title, artist, and album
-- Playback status icon (play/pause)
+- Album art (or app icon fallback)
 - Progress bar with current time and duration
-- "Cider" label indicating the player source
+- Player name (e.g., "Cider", "Firefox", "Spotify")
 
 ### Supported Devices
 
